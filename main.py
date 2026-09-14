@@ -10,7 +10,9 @@ class CNCBackupManagerApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Gestionnaire de Sauvegarde & Comparaison Industrielle CNC - V2")
-        self.root.geometry("950 x 700")
+        
+        # FIX: "950x700" sans espaces entre les nombres et le 'x'
+        self.root.geometry("950x700")
         self.root.minsize(900, 650)
 
         # Base de données / Liste des tâches de sauvegarde
@@ -298,7 +300,7 @@ class CNCBackupManagerApp:
         path_b = self.entry_comp_b.get().strip()
 
         if not os.path.exists(path_a) or not os.path.exists(path_b):
-            # Démo illustrative si les chemins n'existent pas
+            # Démo illustrative
             sample_data = [
                 ("IDENTIQUE", "X0216a-2.P", "2018-10-19 16:13:02", "2018-10-19 16:13:02", "290082", "290082"),
                 ("DIFFERENT", "Y0264a.p", "2018-10-17 14:18:16", "2018-10-18 10:00:00", "508419", "512000"),
@@ -311,7 +313,7 @@ class CNCBackupManagerApp:
             return
 
     def export_excel(self):
-        """ Export universel compatible Excel (CSV/XLSX) sans dépendance critique d'openpyxl """
+        """ Export universel compatible Excel (CSV) sans dépendance d'openpyxl """
         file_path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("Fichier Excel / CSV", "*.csv"), ("Tous les fichiers", "*.*")])
         if not file_path:
             return
@@ -348,7 +350,7 @@ class CNCBackupManagerApp:
                     vals = self.tree_comp.item(row_id)['values']
                     f.write(f"Statut: {vals[0]} | Fichier: {vals[1]} | Modif A: {vals[2]} | Modif B: {vals[3]}\n")
             
-            os.startfile(temp_file, "print") # Déclenche l'impression sous Windows
+            os.startfile(temp_file, "print")
         except Exception as e:
             messagebox.showinfo("Impression", f"Rapport prêt pour l'impression (fichier généré : rapport_comparaison_cnc.txt).\nDétail : {str(e)}")
 
