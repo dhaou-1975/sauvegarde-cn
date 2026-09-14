@@ -127,8 +127,8 @@ class BackupApp:
         self.root.geometry("680x520")
         self.root.configure(bg="#f0f0f0")
 
-        # Titre
-        title_frame = tk.Frame(root, bg="#003366", py=10)
+        # Titre (Correction appliquée : pady=10 au lieu de py=10)
+        title_frame = tk.Frame(root, bg="#003366", pady=10)
         title_frame.pack(fill="x")
         lbl_title = tk.Label(title_frame, text="SAUVEGARDE & COMPARAISON CNC", 
                              font=("Segoe UI", 14, "bold"), fg="white", bg="#003366")
@@ -140,24 +140,24 @@ class BackupApp:
 
         # Boutons de Sauvegarde
         btn1 = tk.Button(btn_frame, text=" Sauvegarder PC 1 (CNC Actif)", font=("Segoe UI", 9, "bold"), bg="#e1e1e1",
-                         command=lambda: execute_backup(r"\\PC-CN\usinage\usinage", r"E:\sauvegarde-usinage", "usinage", self.log_area, self.status_label))[cite: 4]
+                         command=lambda: execute_backup(r"\\PC-CN\usinage\usinage", r"E:\sauvegarde-usinage", "usinage", self.log_area, self.status_label))
         btn1.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
 
         btn2 = tk.Button(btn_frame, text=" Sauvegarder PC 2 (CNC Réserve)", font=("Segoe UI", 9, "bold"), bg="#e1e1e1",
-                         command=lambda: execute_backup(r"\\PC2-CN\usinage2\usinage", r"E:\sauvegarde-usinage", "usinage2", self.log_area, self.status_label))[cite: 4]
+                         command=lambda: execute_backup(r"\\PC2-CN\usinage2\usinage", r"E:\sauvegarde-usinage", "usinage2", self.log_area, self.status_label))
         btn2.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
 
         btn3 = tk.Button(btn_frame, text=" Sauvegarder Poste Local", font=("Segoe UI", 9, "bold"), bg="#e1e1e1",
-                         command=lambda: execute_backup(r"C:\ESPACE-TRAVAIL", r"F:\SAUVGARDES", "ESPACE-TRAVAIL", self.log_area, self.status_label))[cite: 4]
+                         command=lambda: execute_backup(r"C:\ESPACE-TRAVAIL", r"F:\SAUVGARDES", "ESPACE-TRAVAIL", self.log_area, self.status_label))
         btn3.grid(row=1, column=0, padx=5, pady=5, sticky="ew")
 
         # Boutons de Comparaison
         btn4 = tk.Button(btn_frame, text=" Comparer Sauvegardes CNC", font=("Segoe UI", 9), bg="#d9edf7",
-                         command=lambda: compare_backups(r"E:\sauvegarde-usinage", self.log_area))[cite: 4]
+                         command=lambda: compare_backups(r"E:\sauvegarde-usinage", self.log_area))
         btn4.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
 
         btn5 = tk.Button(btn_frame, text=" Comparer Sauvegardes Local", font=("Segoe UI", 9), bg="#d9edf7",
-                         command=lambda: compare_backups(r"F:\SAUVGARDES", self.log_area))[cite: 4]
+                         command=lambda: compare_backups(r"F:\SAUVGARDES", self.log_area))
         btn5.grid(row=2, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
 
         btn_frame.columnconfigure(0, weight=1)
