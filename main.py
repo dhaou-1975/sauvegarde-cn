@@ -1,33 +1,92 @@
 import os
 import sys
+import time
 import datetime
 import shutil
 import csv
 from tkinter import *
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, font
+import win32print
+import win32api
+
+# ==========================================
+# INFORMATIONS DE L'APPLICATION
+# ==========================================
+APP_NAME = "Gestionnaire de Sauvegarde des Programmes CNC"
+APP_VERSION = "2.1.0"
+APP_AUTHOR = "Bouzaien Dhaou"
+APP_EMAIL = "bouzaien.dhaou@gmail.com"
+DATE_CREATED = "14/09/2026"
+DATE_MODIFIED = "14/09/2026"
+
+
+class BackupProgressBarDialog(Toplevel):
+    """ Fenêtre modale avec barre de progression verte pour la sauvegarde """
+    def __init__(self, parent, title="Sauvegarde en cours..."):
+        super().__init__(parent)
+        self.title(title)
+        self.geometry("450x200")
+        self.resizable(False, False)
+        self.grab_set()  # Fenêtre modale
+        self.protocol("WM_DELETE_WINDOW", lambda: None)  # Empêche la fermeture prématurée
+
+        self.label_status = Label(self, text="Préparation de la sauvegarde...", font=("Helvetica", 10, "bold"))
+        self.label_status.pack(pady=15)
+
+        # Style pour la barre de progression en vert
+        self.style = ttk.Style()
+        self.style.theme_use('clam')
+        self.style.configure("Green.Horizontal.TProgressbar", foreground='#4CAF50', background='#4CAF50', thickness=20)
+
+        self.progress = ttk.Progressbar(self, style="Green.Horizontal.TProgressbar", length=350, mode='determinate')
+        self.progress.pack(pady=10)
+
+        self.label_percent = Label(self, text="0%", font=("Helvetica", 10))
+        self.label_percent.pack()
+
+        self.btn_close = Button(self, text="Fermer", font=("Helvetica", 10, "bold"), bg="#2e7d32", fg="white", state=DISABLED, command=self.destroy)
+        self.btn_close.pack(pady=15)
+
+    def update_progress(self, current, total, filename=""):
+        percent = int((current / total) * 100) if total > 0 else 100
+        self.progress['value'] = percent
+        self.label_percent.config(text=f"{percent}% ({current}/{total})")
+        if filename:
+            self.label_status.config(text=f"Copie : {filename}")
+        self.update()
+
+    def complete(self):
+        self.progress['value'] = 100
+        self.label_percent.config(text="100% - Sauvegarde terminée !")
+        self.label_status.config(text="Sauvegarde réalisée avec succès.")
+        self.btn_close.config(state=NORMAL)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
 
 class CNCBackupManagerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Gestionnaire de Sauvegarde & Comparaison Industrielle CNC - V2")
-        
-        # FIX: "950x700" sans espaces entre les nombres et le 'x'
+        self.root.title(APP_NAME)
         self.root.geometry("950x700")
         self.root.minsize(900, 650)
 
-        # Base de données / Liste des tâches de sauvegarde
         self.tasks = []
 
-        # Application du style
-        self.style = ttk.Style()
-        self.style.theme_use('clam')
-        
+        # Menu Barre Supérieure
+        self.menubar = Menu(self.root)
+        self.root.config(menu=self.menubar)
+
+        # Menu Aide / À propos
+        self.help_menu = Menu(self.menubar, tearoff=0)
+        self.help_menu.add_command(label="À propos", command=self.show_about)
+        self.menubar.add_cascade(label="Aide", menu=self.help_menu)
+
         # Header principal
         header_frame = Frame(self.root, bg="#003366", height=50)
         header_frame.pack(fill=X, side=TOP)
         title_label = Label(
             header_frame, 
-            text="SAUVEGARDE & COMPARAISON INDUSTRIELLE CNC - V2", 
+            text=APP_NAME.upper(), 
             font=("Helvetica", 14, "bold"), 
             fg="white", 
             bg="#003366", 
@@ -35,69 +94,68 @@ class CNCBackupManagerApp:
         )
         title_label.pack()
 
-        # Notebook (Onglets)
+        # Onglets
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=BOTH, expand=True, padx=10, pady=10)
 
-        # Onglet 1: Sauvegarde & Planification
         self.tab_backup = Frame(self.notebook, bg="#f4f4f4")
         self.notebook.add(self.tab_backup, text=" Configuration & Planification des Sauvegardes ")
 
-        # Onglet 2: Comparaison
         self.tab_compare = Frame(self.notebook, bg="#f4f4f4")
-        self.notebook.add(self.tab_compare, text=" Comparaison ")
+        self.notebook.add(self.tab_compare, text=" Comparaison de Dossiers ")
 
-        # Construction des interfaces
         self.setup_backup_tab()
         self.setup_compare_tab()
+
+    def show_about(self):
+        """ Affichage de la boîte À Propos """
+        about_text = (
+            f"{APP_NAME}\n\n"
+            f"• Auteur : {APP_AUTHOR}\n"
+            f"• Email : {APP_EMAIL}\n"
+            f"• Version : {APP_VERSION}\n"
+            f"• Date de création : {DATE_CREATED}\n"
+            f"• Dernière modification : {DATE_MODIFIED}"
+        )
+        messagebox.showinfo("À propos", about_text)
 
     # ==========================================
     # ONGLET 1 : SAUVEGARDE ET PLANIFICATION
     # ==========================================
     def setup_backup_tab(self):
-        # Frame Création de tâche
         frame_add = LabelFrame(self.tab_backup, text="Ajouter / Configurer une Sauvegarde", font=("Helvetica", 10, "bold"), bg="#f4f4f4", padx=10, pady=10)
         frame_add.pack(fill=X, padx=10, pady=5)
 
-        # Nom de la sauvegarde
         Label(frame_add, text="Nom de la sauvegarde :", font=("Helvetica", 9, "bold"), bg="#f4f4f4").grid(row=0, column=0, sticky=W, pady=3)
         self.entry_task_name = Entry(frame_add, width=40)
         self.entry_task_name.grid(row=0, column=1, columnspan=2, sticky=W, pady=3)
 
-        # Source
         Label(frame_add, text="Dossier / Fichier Source :", font=("Helvetica", 9, "bold"), bg="#f4f4f4").grid(row=1, column=0, sticky=W, pady=3)
         self.entry_src = Entry(frame_add, width=50)
         self.entry_src.grid(row=1, column=1, sticky=W, pady=3)
-        btn_browse_src = Button(frame_add, text="Parcourir...", font=("Helvetica", 9, "bold"), command=self.browse_src)
-        btn_browse_src.grid(row=1, column=2, padx=5, pady=3)
+        Button(frame_add, text="Parcourir...", font=("Helvetica", 9, "bold"), command=self.browse_src).grid(row=1, column=2, padx=5, pady=3)
 
-        # Destination
         Label(frame_add, text="Dossier Destination :", font=("Helvetica", 9, "bold"), bg="#f4f4f4").grid(row=2, column=0, sticky=W, pady=3)
         self.entry_dest = Entry(frame_add, width=50)
         self.entry_dest.grid(row=2, column=1, sticky=W, pady=3)
-        btn_browse_dest = Button(frame_add, text="Parcourir...", font=("Helvetica", 9, "bold"), command=self.browse_dest)
-        btn_browse_dest.grid(row=2, column=2, padx=5, pady=3)
+        Button(frame_add, text="Parcourir...", font=("Helvetica", 9, "bold"), command=self.browse_dest).grid(row=2, column=2, padx=5, pady=3)
 
-        # Type de Planification
         Label(frame_add, text="Type de récurrence :", font=("Helvetica", 9, "bold"), bg="#f4f4f4").grid(row=3, column=0, sticky=W, pady=5)
         self.combo_type = ttk.Combobox(frame_add, values=["Journalier", "Hebdomadaire", "Mensuel"], state="readonly", width=20)
         self.combo_type.current(0)
         self.combo_type.grid(row=3, column=1, sticky=W, pady=5)
 
-        # Sélection des Jours (Lundi à Dimanche)
         Label(frame_add, text="Jours d'exécution :", font=("Helvetica", 9, "bold"), bg="#f4f4f4").grid(row=4, column=0, sticky=W, pady=3)
         days_frame = Frame(frame_add, bg="#f4f4f4")
         days_frame.grid(row=4, column=1, columnspan=2, sticky=W)
 
         self.days_vars = {}
-        days_list = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
-        for day in days_list:
+        for day in ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]:
             var = BooleanVar(value=True)
             chk = Checkbutton(days_frame, text=day, variable=var, bg="#f4f4f4", font=("Helvetica", 8))
             chk.pack(side=LEFT, padx=2)
             self.days_vars[day] = var
 
-        # Horaires (Heure et Minute)
         Label(frame_add, text="Heure d'exécution (HH:MM) :", font=("Helvetica", 9, "bold"), bg="#f4f4f4").grid(row=5, column=0, sticky=W, pady=5)
         time_frame = Frame(frame_add, bg="#f4f4f4")
         time_frame.grid(row=5, column=1, sticky=W)
@@ -108,18 +166,16 @@ class CNCBackupManagerApp:
         self.spin_min = Spinbox(time_frame, from_=0, to=59, width=3, format="%02.0f")
         self.spin_min.pack(side=LEFT)
 
-        # Bouton d'enregistrement
-        btn_save_task = Button(
+        Button(
             frame_add, 
             text="Enregistrer la Sauvegarde", 
             font=("Helvetica", 10, "bold"), 
             bg="#2e7d32", 
             fg="white", 
             command=self.add_task
-        )
-        btn_save_task.grid(row=6, column=0, columnspan=3, pady=10, sticky=EW)
+        ).grid(row=6, column=0, columnspan=3, pady=10, sticky=EW)
 
-        # Frame Liste des sauvegardes
+        # Liste des sauvegardes
         frame_list = LabelFrame(self.tab_backup, text="Liste des Sauvegardes Enregistrées", font=("Helvetica", 10, "bold"), bg="#f4f4f4", padx=10, pady=10)
         frame_list.pack(fill=BOTH, expand=True, padx=10, pady=5)
 
@@ -140,29 +196,11 @@ class CNCBackupManagerApp:
         self.tree_tasks.column("time", width=60)
         self.tree_tasks.pack(fill=BOTH, expand=True, side=LEFT)
 
-        # Actions manuelles
         btn_actions = Frame(frame_list, bg="#f4f4f4")
         btn_actions.pack(fill=Y, side=RIGHT, padx=5)
 
-        btn_run_now = Button(
-            btn_actions, 
-            text="Lancer Manuel", 
-            font=("Helvetica", 9, "bold"), 
-            bg="#1976d2", 
-            fg="white", 
-            command=self.run_task_manual
-        )
-        btn_run_now.pack(fill=X, pady=5)
-
-        btn_delete_task = Button(
-            btn_actions, 
-            text="Supprimer", 
-            font=("Helvetica", 9, "bold"), 
-            bg="#c62828", 
-            fg="white", 
-            command=self.delete_task
-        )
-        btn_delete_task.pack(fill=X, pady=5)
+        Button(btn_actions, text="Lancer Manuel", font=("Helvetica", 9, "bold"), bg="#1976d2", fg="white", command=self.run_task_manual).pack(fill=X, pady=5)
+        Button(btn_actions, text="Supprimer", font=("Helvetica", 9, "bold"), bg="#c62828", fg="white", command=self.delete_task).pack(fill=X, pady=5)
 
     def browse_src(self):
         path = filedialog.askdirectory(title="Choisir le dossier source")
@@ -181,10 +219,8 @@ class CNCBackupManagerApp:
         src = self.entry_src.get().strip()
         dest = self.entry_dest.get().strip()
         rec_type = self.combo_type.get()
-        
         selected_days = [day[:3] for day, var in self.days_vars.items() if var.get()]
         days_str = ", ".join(selected_days) if selected_days else "Aucun"
-        
         time_str = f"{int(self.spin_hour.get()):02d}:{int(self.spin_min.get()):02d}"
 
         if not name or not src or not dest:
@@ -194,31 +230,57 @@ class CNCBackupManagerApp:
         task = (name, src, dest, rec_type, days_str, time_str)
         self.tasks.append(task)
         self.tree_tasks.insert("", END, values=task)
-        
-        # Réinitialiser
         self.entry_task_name.delete(0, END)
-        messagebox.showinfo("Succès", f"La sauvegarde '{name}' a été configurée et ajoutée.")
+        messagebox.showinfo("Succès", f"La sauvegarde '{name}' a été ajoutée.")
 
     def run_task_manual(self):
         selected = self.tree_tasks.selection()
         if not selected:
             messagebox.showwarning("Sélection requise", "Veuillez sélectionner une sauvegarde à déclencher.")
             return
-        
+
         item = self.tree_tasks.item(selected[0])
         name, src, dest, _, _, _ = item['values']
 
         if not os.path.exists(src):
-            messagebox.showerror("Erreur Réseau / Source", f"Source inaccessible : {src}\nVérifiez le réseau ou le chemin.")
+            messagebox.showerror("Erreur Source", f"Le dossier source n'existe pas ou est inaccessible :\n{src}")
             return
 
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        target_dir = os.path.join(dest, f"{name}_{timestamp}")
+
+        # Lister tous les fichiers à copier pour la barre de progression
+        file_list = []
+        if os.path.isfile(src):
+            file_list.append(src)
+        else:
+            for root_dir, _, files in os.walk(src):
+                for f in files:
+                    file_list.append(os.path.join(root_dir, f))
+
+        total_files = len(file_list)
+        if total_files == 0:
+            messagebox.showwarning("Dossier Vide", "Le dossier source est vide.")
+            return
+
+        # Ouvrir la fenêtre modale de progression
+        progress_dialog = BackupProgressBarDialog(self.root, title=f"Sauvegarde : {name}")
+
         try:
-            timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            target_dir = os.path.join(dest, f"{name}_{timestamp}")
-            shutil.copytree(src, target_dir)
-            messagebox.showinfo("Sauvegarde Effectuée", f"La sauvegarde '{name}' a été réalisée avec succès dans :\n{target_dir}")
+            os.makedirs(target_dir, exist_ok=True)
+            for idx, file_path in enumerate(file_list, 1):
+                rel_path = os.path.relpath(file_path, src) if os.path.isdir(src) else os.path.basename(file_path)
+                dest_file_path = os.path.join(target_dir, rel_path)
+                os.makedirs(os.path.dirname(dest_file_path), exist_ok=True)
+
+                shutil.copy2(file_path, dest_file_path)
+                progress_dialog.update_progress(idx, total_files, filename=os.path.basename(file_path))
+                time.sleep(0.01)
+
+            progress_dialog.complete()
         except Exception as e:
-            messagebox.showerror("Erreur de sauvegarde", f"Échec lors de la copie : {str(e)}")
+            progress_dialog.destroy()
+            messagebox.showerror("Erreur de sauvegarde", f"Échec lors de la sauvegarde : {str(e)}")
 
     def delete_task(self):
         selected = self.tree_tasks.selection()
@@ -226,64 +288,59 @@ class CNCBackupManagerApp:
             self.tree_tasks.delete(selected[0])
 
     # ==========================================
-    # ONGLET 2 : COMPARAISON DE DOSSIERS / FICHIERS
+    # ONGLET 2 : COMPARAISON DE DOSSIERS
     # ==========================================
     def setup_compare_tab(self):
-        frame_sel = LabelFrame(self.tab_compare, text="Sélection des éléments à comparer", font=("Helvetica", 10, "bold"), bg="#f4f4f4", padx=10, pady=10)
+        frame_sel = LabelFrame(self.tab_compare, text="Sélection des dossiers à comparer", font=("Helvetica", 10, "bold"), bg="#f4f4f4", padx=10, pady=10)
         frame_sel.pack(fill=X, padx=10, pady=5)
 
-        Label(frame_sel, text="Élément A (Récent / Référence) :", font=("Helvetica", 9, "bold"), bg="#f4f4f4").grid(row=0, column=0, sticky=W)
+        Label(frame_sel, text="Dossier A (Référence) :", font=("Helvetica", 9, "bold"), bg="#f4f4f4").grid(row=0, column=0, sticky=W)
         self.entry_comp_a = Entry(frame_sel, width=50)
         self.entry_comp_a.grid(row=0, column=1, padx=5, pady=3)
-        Button(frame_sel, text="Dossier", font=("Helvetica", 9, "bold"), command=lambda: self.browse_comp(self.entry_comp_a)).grid(row=0, column=2, padx=2)
+        Button(frame_sel, text="Parcourir", font=("Helvetica", 9, "bold"), command=lambda: self.browse_comp(self.entry_comp_a)).grid(row=0, column=2, padx=2)
 
-        Label(frame_sel, text="Élément B (Ancien / Comparé) :", font=("Helvetica", 9, "bold"), bg="#f4f4f4").grid(row=1, column=0, sticky=W)
+        Label(frame_sel, text="Dossier B (Comparé) :", font=("Helvetica", 9, "bold"), bg="#f4f4f4").grid(row=1, column=0, sticky=W)
         self.entry_comp_b = Entry(frame_sel, width=50)
         self.entry_comp_b.grid(row=1, column=1, padx=5, pady=3)
-        Button(frame_sel, text="Dossier", font=("Helvetica", 9, "bold"), command=lambda: self.browse_comp(self.entry_comp_b)).grid(row=1, column=2, padx=2)
+        Button(frame_sel, text="Parcourir", font=("Helvetica", 9, "bold"), command=lambda: self.browse_comp(self.entry_comp_b)).grid(row=1, column=2, padx=2)
 
-        btn_compare = Button(
+        Button(
             frame_sel, 
             text="Lancer la Comparaison", 
             font=("Helvetica", 10, "bold"), 
             bg="#0277bd", 
             fg="white", 
             command=self.run_comparison
-        )
-        btn_compare.grid(row=2, column=0, columnspan=3, pady=8, sticky=EW)
+        ).grid(row=2, column=0, columnspan=3, pady=8, sticky=EW)
 
-        # Tableau des résultats
+        # Tableau des résultats (Sans les colonnes de Taille)
         frame_res = LabelFrame(self.tab_compare, text="Résultats de la comparaison", font=("Helvetica", 10, "bold"), bg="#f4f4f4", padx=10, pady=10)
         frame_res.pack(fill=BOTH, expand=True, padx=10, pady=5)
 
-        cols = ("statut", "fichier", "date_a", "date_b", "taille_a", "taille_b")
+        cols = ("statut", "fichier", "date_a", "date_b")
         self.tree_comp = ttk.Treeview(frame_res, columns=cols, show="headings")
         self.tree_comp.heading("statut", text="Statut")
         self.tree_comp.heading("fichier", text="Fichier / Chemin Relatif")
         self.tree_comp.heading("date_a", text="Date Modification (A)")
         self.tree_comp.heading("date_b", text="Date Modification (B)")
-        self.tree_comp.heading("taille_a", text="Taille A (Octets)")
-        self.tree_comp.heading("taille_b", text="Taille B (Octets)")
 
-        self.tree_comp.column("statut", width=110, anchor=CENTER)
-        self.tree_comp.column("fichier", width=220)
-        self.tree_comp.column("date_a", width=140)
-        self.tree_comp.column("date_b", width=140)
-        self.tree_comp.column("taille_a", width=90)
-        self.tree_comp.column("taille_b", width=90)
+        self.tree_comp.column("statut", width=120, anchor=CENTER)
+        self.tree_comp.column("fichier", width=350)
+        self.tree_comp.column("date_a", width=180)
+        self.tree_comp.column("date_b", width=180)
         self.tree_comp.pack(fill=BOTH, expand=True)
 
-        # Tags de coloration (VERT pour identique, ROUGE pour différent)
+        # Style de coloration des lignes
         self.tree_comp.tag_configure("IDENTIQUE", foreground="green", font=("Helvetica", 9, "bold"))
         self.tree_comp.tag_configure("DIFFERENT", foreground="red", font=("Helvetica", 9, "bold"))
 
-        # Frame des boutons d'export/impression
+        # Boutons d'exportation / impression
         frame_export = Frame(self.tab_compare, bg="#f4f4f4")
         frame_export.pack(fill=X, padx=10, pady=5)
 
         Button(frame_export, text="Exporter en TXT", font=("Helvetica", 9, "bold"), command=self.export_txt).pack(side=LEFT, padx=5)
-        Button(frame_export, text="Exporter en Excel (.xlsx / .csv)", font=("Helvetica", 9, "bold"), command=self.export_excel).pack(side=LEFT, padx=5)
-        Button(frame_export, text="Imprimer / Imprimante Système", font=("Helvetica", 9, "bold"), bg="#37474f", fg="white", command=self.print_results).pack(side=RIGHT, padx=5)
+        Button(frame_export, text="Exporter en Excel (.csv / .xlsx)", font=("Helvetica", 9, "bold"), command=self.export_excel).pack(side=LEFT, padx=5)
+        Button(frame_export, text="Imprimer (Menu Impression Système)", font=("Helvetica", 9, "bold"), bg="#37474f", fg="white", command=self.print_results).pack(side=RIGHT, padx=5)
 
     def browse_comp(self, entry_widget):
         path = filedialog.askdirectory()
@@ -292,41 +349,69 @@ class CNCBackupManagerApp:
             entry_widget.insert(0, path)
 
     def run_comparison(self):
-        # Réinitialiser la grille
+        """ Comparaison réelle entre les dossiers A et B """
         for item in self.tree_comp.get_children():
             self.tree_comp.delete(item)
 
-        path_a = self.entry_comp_a.get().strip()
-        path_b = self.entry_comp_b.get().strip()
+        dir_a = self.entry_comp_a.get().strip()
+        dir_b = self.entry_comp_b.get().strip()
 
-        if not os.path.exists(path_a) or not os.path.exists(path_b):
-            # Démo illustrative
-            sample_data = [
-                ("IDENTIQUE", "X0216a-2.P", "2018-10-19 16:13:02", "2018-10-19 16:13:02", "290082", "290082"),
-                ("DIFFERENT", "Y0264a.p", "2018-10-17 14:18:16", "2018-10-18 10:00:00", "508419", "512000"),
-                ("IDENTIQUE", "dha.vt8", "2018-10-31 11:58:40", "2018-10-31 11:58:40", "274537", "274537"),
-                ("DIFFERENT", "niv-d60.vt8", "2018-05-10 09:25:22", "2018-05-12 11:20:10", "528", "610")
-            ]
-            for row in sample_data:
-                tag = "IDENTIQUE" if row[0] == "IDENTIQUE" else "DIFFERENT"
-                self.tree_comp.insert("", END, values=row, tags=(tag,))
+        if not os.path.exists(dir_a) or not os.path.exists(dir_b):
+            messagebox.showerror("Erreur Dossier", "Veuillez sélectionner deux dossiers valides à comparer.")
             return
 
+        files_a = {}
+        for root_dir, _, files in os.walk(dir_a):
+            for f in files:
+                full_p = os.path.join(root_dir, f)
+                rel_p = os.path.relpath(full_p, dir_a)
+                mtime = os.path.getmtime(full_p)
+                files_a[rel_p] = (mtime, datetime.datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S'))
+
+        files_b = {}
+        for root_dir, _, files in os.walk(dir_b):
+            for f in files:
+                full_p = os.path.join(root_dir, f)
+                rel_p = os.path.relpath(full_p, dir_b)
+                mtime = os.path.getmtime(full_p)
+                files_b[rel_p] = (mtime, datetime.datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S'))
+
+        all_rel_paths = sorted(list(set(files_a.keys()).union(set(files_b.keys()))))
+
+        for rel_p in all_rel_paths:
+            info_a = files_a.get(rel_p)
+            info_b = files_b.get(rel_p)
+
+            date_a_str = info_a[1] if info_a else "Absent dans A"
+            date_b_str = info_b[1] if info_b else "Absent dans B"
+
+            if info_a and info_b:
+                if abs(info_a[0] - info_b[0]) < 1.0:
+                    status = "IDENTIQUE"
+                else:
+                    status = "DIFFERENT"
+            else:
+                status = "DIFFERENT"
+
+            self.tree_comp.insert("", END, values=(status, rel_p, date_a_str, date_b_str), tags=(status,))
+
     def export_excel(self):
-        """ Export universel compatible Excel (CSV) sans dépendance d'openpyxl """
-        file_path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("Fichier Excel / CSV", "*.csv"), ("Tous les fichiers", "*.*")])
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("Fichier CSV (Excel)", "*.csv"), ("Tous les fichiers", "*.*")]
+        )
         if not file_path:
             return
 
         try:
             with open(file_path, mode="w", newline="", encoding="utf-8-sig") as file:
                 writer = csv.writer(file, delimiter=";")
-                writer.writerow(["Statut", "Fichier", "Date Modification (A)", "Date Modification (B)", "Taille A", "Taille B"])
+                writer.writerow(["Statut", "Fichier / Chemin Relatif", "Date Modification (A)", "Date Modification (B)"])
                 for row_id in self.tree_comp.get_children():
                     writer.writerow(self.tree_comp.item(row_id)['values'])
-            messagebox.showinfo("Export Réussi", f"Fichier exporté avec succès :\n{file_path}\n(Ouvrable directement dans Microsoft Excel)")
+            messagebox.showinfo("Export Réussi", f"Rapport exporté avec succès :\n{file_path}")
         except Exception as e:
-            messagebox.showerror("Erreur d'export", f"Impossible d'exporter : {str(e)}")
+            messagebox.showerror("Erreur Export", str(e))
 
     def export_txt(self):
         file_path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Fichier Texte", "*.txt")])
@@ -334,6 +419,7 @@ class CNCBackupManagerApp:
             return
         try:
             with open(file_path, mode="w", encoding="utf-8") as file:
+                file.write("=== RAPPORT DE COMPARAISON INDUSTRIELLE CNC ===\n\n")
                 for row_id in self.tree_comp.get_children():
                     file.write("\t".join(map(str, self.tree_comp.item(row_id)['values'])) + "\n")
             messagebox.showinfo("Export Réussi", f"Rapport TXT sauvegardé sous :\n{file_path}")
@@ -341,18 +427,24 @@ class CNCBackupManagerApp:
             messagebox.showerror("Erreur", str(e))
 
     def print_results(self):
-        """ Génère un fichier imprimable et déclenche l'impression système """
+        """ Ouvre la boîte de dialogue d'impression standard de Windows """
         try:
-            temp_file = "rapport_comparaison_cnc.txt"
+            temp_file = os.path.join(os.environ.get("TEMP", "."), "rapport_comparaison_cnc.txt")
             with open(temp_file, "w", encoding="utf-8") as f:
-                f.write("=== RAPPORT DE COMPARAISON INDUSTRIELLE CNC ===\n\n")
+                f.write(f"=== {APP_NAME.upper()} ===\n")
+                f.write(f"Auteur: {APP_AUTHOR} | Version: {APP_VERSION}\n")
+                f.write(f"Date du rapport: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                f.write(f"{'STATUT':<12} | {'FICHIER':<40} | {'DATE MODIF (A)':<20} | {'DATE MODIF (B)':<20}\n")
+                f.write("-" * 95 + "\n")
                 for row_id in self.tree_comp.get_children():
-                    vals = self.tree_comp.item(row_id)['values']
-                    f.write(f"Statut: {vals[0]} | Fichier: {vals[1]} | Modif A: {vals[2]} | Modif B: {vals[3]}\n")
-            
-            os.startfile(temp_file, "print")
+                    v = self.tree_comp.item(row_id)['values']
+                    f.write(f"{v[0]:<12} | {v[1]:<40} | {v[2]:<20} | {v[3]:<20}\n")
+
+            # Déclenche l'impression avec la boîte de dialogue système
+            win32api.ShellExecute(0, "print", temp_file, None, ".", 0)
         except Exception as e:
-            messagebox.showinfo("Impression", f"Rapport prêt pour l'impression (fichier généré : rapport_comparaison_cnc.txt).\nDétail : {str(e)}")
+            messagebox.showerror("Erreur d'impression", f"Impossible d'ouvrir le menu d'impression :\n{str(e)}")
+
 
 if __name__ == "__main__":
     root = Tk()
