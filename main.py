@@ -9,7 +9,7 @@ import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 
-# Tentative d'importation de ReportLab pour la génération du PDF A4 parfait
+# Tentative d'importation de ReportLab pour la génération du PDF A4
 HAS_REPORTLAB = False
 try:
     from reportlab.lib.pagesizes import A4
@@ -22,7 +22,7 @@ except ImportError:
 
 
 CONFIG_FILE = "config_cnc.json"
-DEFAULT_PASSWORD_HASH = hashlib.sha256("1234".encode()).hexdigest() # Mot de passe par défaut : 1234
+DEFAULT_PASSWORD_HASH = hashlib.sha256("1234".encode()).hexdigest()  # Mot de passe par défaut : 1234
 
 
 def load_config():
@@ -122,9 +122,9 @@ class CNCBackupManager(tk.Tk):
         menubar.add_cascade(label="Sécurité / Options", menu=menu_admin)
         self.config(menu=menubar)
 
-        # En-tête principal
+        # En-tête principal (Correction : pady au lieu de py)
         header = tk.Label(self, text="GESTIONNAIRE DE SAUVEGARDE DES PROGRAMMES CNC",
-                          bg="#0B3C5D", fg="white", font=("Arial", 14, "bold"), py=8)
+                          bg="#0B3C5D", fg="white", font=("Arial", 14, "bold"), pady=8)
         header.pack(fill=tk.X)
 
         # Onglets
@@ -148,17 +148,17 @@ class CNCBackupManager(tk.Tk):
         ttk.Entry(frame_dirs, textvariable=self.var_dir_b, width=68).grid(row=1, column=1, padx=5, pady=5)
         ttk.Button(frame_dirs, text="Parcourir", command=lambda: self.browse_dir(self.var_dir_b)).grid(row=1, column=2, padx=5, pady=5)
 
-        # Double bouton de comparaison
+        # Double bouton de comparaison (Correction : pady au lieu de py)
         frame_btns = ttk.Frame(tab_comp)
         frame_btns.pack(fill=tk.X, padx=10, pady=5)
 
         btn_fast = tk.Button(frame_btns, text="Lancer la Comparaison Rapide (Dates/Tailles)", 
-                             bg="#0288D1", fg="white", font=("Arial", 10, "bold"), py=4,
+                             bg="#0288D1", fg="white", font=("Arial", 10, "bold"), pady=4,
                              command=lambda: self.run_comparison(deep=False))
         btn_fast.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
 
         btn_deep = tk.Button(frame_btns, text="🔍 Comparaison Approfondie (Contenu Texte CNC)", 
-                             bg="#2E7D32", fg="white", font=("Arial", 10, "bold"), py=4,
+                             bg="#2E7D32", fg="white", font=("Arial", 10, "bold"), pady=4,
                              command=lambda: self.run_comparison(deep=True))
         btn_deep.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
 
@@ -233,10 +233,8 @@ class CNCBackupManager(tk.Tk):
 
             if path_a and path_b:
                 if deep:
-                    # Comparaison du contenu texte réel (ignore les dates si le texte est identique)
                     is_same = filecmp.cmp(path_a, path_b, shallow=False)
                 else:
-                    # Comparaison rapide basée sur la date et la taille
                     stat_a = os.stat(path_a)
                     stat_b = os.stat(path_b)
                     is_same = (stat_a.st_mtime == stat_b.st_mtime) and (stat_a.st_size == stat_b.st_size)
@@ -303,12 +301,12 @@ class CNCBackupManager(tk.Tk):
         ]]
 
         table_styles = [
-            ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#0B3C5D")),
-            ('ALIGN', (0,0), (-1,-1), 'LEFT'),
-            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-            ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
-            ('BOTTOMPADDING', (0,0), (-1,-1), 3),
-            ('TOPPADDING', (0,0), (-1,-1), 3),
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#0B3C5D")),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+            ('TOPPADDING', (0, 0), (-1, -1), 3),
         ]
 
         for i, r in enumerate(rows, start=1):
