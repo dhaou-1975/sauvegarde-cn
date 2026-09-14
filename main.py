@@ -5,9 +5,7 @@ import datetime
 import shutil
 import csv
 from tkinter import *
-from tkinter import ttk, filedialog, messagebox, font
-import win32print
-import win32api
+from tkinter import ttk, filedialog, messagebox
 
 # ==========================================
 # INFORMATIONS DE L'APPLICATION
@@ -67,7 +65,7 @@ class CNCBackupManagerApp:
     def __init__(self, root):
         self.root = root
         self.root.title(APP_NAME)
-        self.root.geometry("950x700")
+        self.root.geometry("980x730")
         self.root.minsize(900, 650)
 
         self.tasks = []
@@ -144,21 +142,35 @@ class CNCBackupManagerApp:
         self.combo_type = ttk.Combobox(frame_add, values=["Journalier", "Hebdomadaire", "Mensuel"], state="readonly", width=20)
         self.combo_type.current(0)
         self.combo_type.grid(row=3, column=1, sticky=W, pady=5)
+        self.combo_type.bind("<<ComboboxSelected>>", self.on_recurrence_change)
 
-        Label(frame_add, text="Jours d'exécution :", font=("Helvetica", 9, "bold"), bg="#f4f4f4").grid(row=4, column=0, sticky=W, pady=3)
-        days_frame = Frame(frame_add, bg="#f4f4f4")
-        days_frame.grid(row=4, column=1, columnspan=2, sticky=W)
+        # Jours d'exécution hebdomadaire
+        self.label_days = Label(frame_add, text="Jours actifs (Hebdo) :", font=("Helvetica", 9, "bold"), bg="#f4f4f4")
+        self.label_days.grid(row=4, column=0, sticky=W, pady=3)
+        
+        self.days_frame = Frame(frame_add, bg="#f4f4f4")
+        self.days_frame.grid(row=4, column=1, columnspan=2, sticky=W)
 
         self.days_vars = {}
+        self.days_checkbuttons = []
         for day in ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]:
             var = BooleanVar(value=True)
-            chk = Checkbutton(days_frame, text=day, variable=var, bg="#f4f4f4", font=("Helvetica", 8))
+            chk = Checkbutton(self.days_frame, text=day, variable=var, bg="#f4f4f4", font=("Helvetica", 8))
             chk.pack(side=LEFT, padx=2)
             self.days_vars[day] = var
+            self.days_checkbuttons.append(chk)
 
-        Label(frame_add, text="Heure d'exécution (HH:MM) :", font=("Helvetica", 9, "bold"), bg="#f4f4f4").grid(row=5, column=0, sticky=W, pady=5)
+        # Jour du mois pour le mode Mensuel
+        self.label_month_day = Label(frame_add, text="Jour du mois (1-31) :", font=("Helvetica", 9, "bold"), bg="#f4f4f4")
+        self.label_month_day.grid(row=5, column=0, sticky=W, pady=5)
+
+        self.spin_month_day = Spinbox(frame_add, from_=1, to=31, width=5, format="%02.0f", state=DISABLED)
+        self.spin_month_day.grid(row=5, column=1, sticky=W, pady=5)
+
+        # Heure d'exécution
+        Label(frame_add, text="Heure d'exécution (HH:MM) :", font=("Helvetica", 9, "bold"), bg="#f4f4f4").grid(row=6, column=0, sticky=W, pady=5)
         time_frame = Frame(frame_add, bg="#f4f4f4")
-        time_frame.grid(row=5, column=1, sticky=W)
+        time_frame.grid(row=6, column=1, sticky=W)
 
         self.spin_hour = Spinbox(time_frame, from_=0, to=23, width=3, format="%02.0f")
         self.spin_hour.pack(side=LEFT)
@@ -173,7 +185,7 @@ class CNCBackupManagerApp:
             bg="#2e7d32", 
             fg="white", 
             command=self.add_task
-        ).grid(row=6, column=0, columnspan=3, pady=10, sticky=EW)
+        ).grid(row=7, column=0, columnspan=3, pady=10, sticky=EW)
 
         # Liste des sauvegardes
         frame_list = LabelFrame(self.tab_backup, text="Liste des Sauvegardes Enregistrées", font=("Helvetica", 10, "bold"), bg="#f4f4f4", padx=10, pady=10)
@@ -185,7 +197,7 @@ class CNCBackupManagerApp:
         self.tree_tasks.heading("src", text="Source")
         self.tree_tasks.heading("dest", text="Destination")
         self.tree_tasks.heading("type", text="Récurrence")
-        self.tree_tasks.heading("days", text="Jours actifs")
+        self.tree_tasks.heading("days", text="Planification / Jour")
         self.tree_tasks.heading("time", text="Heure")
 
         self.tree_tasks.column("name", width=130)
@@ -201,6 +213,25 @@ class CNCBackupManagerApp:
 
         Button(btn_actions, text="Lancer Manuel", font=("Helvetica", 9, "bold"), bg="#1976d2", fg="white", command=self.run_task_manual).pack(fill=X, pady=5)
         Button(btn_actions, text="Supprimer", font=("Helvetica", 9, "bold"), bg="#c62828", fg="white", command=self.delete_task).pack(fill=X, pady=5)
+
+        # État initial selon récurrence
+        self.on_recurrence_change()
+
+    def on_recurrence_change(self, event=None):
+        rec_type = self.combo_type.get()
+        if rec_type == "Mensuel":
+            # Activer la case du jour du mois et désactiver la sélection par jour de semaine
+            self.spin_month_day.config(state=NORMAL)
+            for chk in self.days_checkbuttons:
+                chk.config(state=DISABLED)
+        elif rec_type == "Hebdomadaire":
+            self.spin_month_day.config(state=DISABLED)
+            for chk in self.days_checkbuttons:
+                chk.config(state=NORMAL)
+        else:  # Journalier
+            self.spin_month_day.config(state=DISABLED)
+            for chk in self.days_checkbuttons:
+                chk.config(state=NORMAL)
 
     def browse_src(self):
         path = filedialog.askdirectory(title="Choisir le dossier source")
@@ -219,13 +250,21 @@ class CNCBackupManagerApp:
         src = self.entry_src.get().strip()
         dest = self.entry_dest.get().strip()
         rec_type = self.combo_type.get()
-        selected_days = [day[:3] for day, var in self.days_vars.items() if var.get()]
-        days_str = ", ".join(selected_days) if selected_days else "Aucun"
-        time_str = f"{int(self.spin_hour.get()):02d}:{int(self.spin_min.get()):02d}"
 
         if not name or not src or not dest:
             messagebox.showwarning("Champs manquants", "Veuillez remplir le nom, la source et la destination.")
             return
+
+        if rec_type == "Mensuel":
+            day_val = self.spin_month_day.get()
+            days_str = f"Le {int(day_val):02d} du mois"
+        elif rec_type == "Hebdomadaire":
+            selected_days = [day[:3] for day, var in self.days_vars.items() if var.get()]
+            days_str = ", ".join(selected_days) if selected_days else "Aucun"
+        else:
+            days_str = "Tous les jours"
+
+        time_str = f"{int(self.spin_hour.get()):02d}:{int(self.spin_min.get()):02d}"
 
         task = (name, src, dest, rec_type, days_str, time_str)
         self.tasks.append(task)
@@ -313,7 +352,7 @@ class CNCBackupManagerApp:
             command=self.run_comparison
         ).grid(row=2, column=0, columnspan=3, pady=8, sticky=EW)
 
-        # Tableau des résultats (Sans les colonnes de Taille)
+        # Tableau des résultats
         frame_res = LabelFrame(self.tab_compare, text="Résultats de la comparaison", font=("Helvetica", 10, "bold"), bg="#f4f4f4", padx=10, pady=10)
         frame_res.pack(fill=BOTH, expand=True, padx=10, pady=5)
 
@@ -339,7 +378,7 @@ class CNCBackupManagerApp:
         frame_export.pack(fill=X, padx=10, pady=5)
 
         Button(frame_export, text="Exporter en TXT", font=("Helvetica", 9, "bold"), command=self.export_txt).pack(side=LEFT, padx=5)
-        Button(frame_export, text="Exporter en Excel (.csv / .xlsx)", font=("Helvetica", 9, "bold"), command=self.export_excel).pack(side=LEFT, padx=5)
+        Button(frame_export, text="Exporter en Excel (.csv)", font=("Helvetica", 9, "bold"), command=self.export_excel).pack(side=LEFT, padx=5)
         Button(frame_export, text="Imprimer (Menu Impression Système)", font=("Helvetica", 9, "bold"), bg="#37474f", fg="white", command=self.print_results).pack(side=RIGHT, padx=5)
 
     def browse_comp(self, entry_widget):
@@ -349,7 +388,6 @@ class CNCBackupManagerApp:
             entry_widget.insert(0, path)
 
     def run_comparison(self):
-        """ Comparaison réelle entre les dossiers A et B """
         for item in self.tree_comp.get_children():
             self.tree_comp.delete(item)
 
@@ -427,7 +465,7 @@ class CNCBackupManagerApp:
             messagebox.showerror("Erreur", str(e))
 
     def print_results(self):
-        """ Ouvre la boîte de dialogue d'impression standard de Windows """
+        """ Impression native sous Windows sans dépendance externe """
         try:
             temp_file = os.path.join(os.environ.get("TEMP", "."), "rapport_comparaison_cnc.txt")
             with open(temp_file, "w", encoding="utf-8") as f:
@@ -440,10 +478,12 @@ class CNCBackupManagerApp:
                     v = self.tree_comp.item(row_id)['values']
                     f.write(f"{v[0]:<12} | {v[1]:<40} | {v[2]:<20} | {v[3]:<20}\n")
 
-            # Déclenche l'impression avec la boîte de dialogue système
-            win32api.ShellExecute(0, "print", temp_file, None, ".", 0)
+            if sys.platform == "win32":
+                os.startfile(temp_file, "print")
+            else:
+                messagebox.showinfo("Impression", f"Fichier généré pour impression : {temp_file}")
         except Exception as e:
-            messagebox.showerror("Erreur d'impression", f"Impossible d'ouvrir le menu d'impression :\n{str(e)}")
+            messagebox.showerror("Erreur d'impression", f"Impossible de lancer l'impression :\n{str(e)}")
 
 
 if __name__ == "__main__":
