@@ -12,15 +12,14 @@ import time
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 
-# Informations de l'application (Section "À propos")
+# Informations de l'application
 APP_NAME = "Gestionnaire de Sauvegarde des Programmes CNC"
 APP_VERSION = "2.1.0"
 APP_AUTHOR = "Bouzaien Dhaou"
 APP_EMAIL = "bouzaien.dhaou@gmail.com"
 DATE_CREATED = "14/09/2026"
-DATE_MODIFIED = "14/09/2026"
+DATE_MODIFIED = "15/09/2026"
 
-# Configuration et mot de passe (Crypté SHA-256)
 CONFIG_FILE = "config_cnc.json"
 DEFAULT_PASSWORD_HASH = hashlib.sha256("1234".encode()).hexdigest()
 
@@ -53,16 +52,21 @@ def save_config(config):
 
 
 # ==========================================
-# BOÎTE DE PROGRESSION VERTE POUR SAUVEGARDE
+# BOÎTE DE PROGRESSION ET D'ANNULATION
 # ==========================================
 class BackupProgressBarDialog(tk.Toplevel):
     def __init__(self, parent, title="Sauvegarde en cours..."):
         super().__init__(parent)
         self.title(title)
-        self.geometry("450x200")
+        self.geometry("450x220")
         self.resizable(False, False)
         self.grab_set()
-        self.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        self.cancelled = False
+        self.is_finished = False
+
+        # Gestion de la croix rouge de fermeture
+        self.protocol("WM_DELETE_WINDOW", self.on_close_attempt)
 
         self.label_status = tk.Label(self, text="Préparation de la sauvegarde...", font=("Arial", 10, "bold"))
         self.label_status.pack(pady=15)
@@ -77,8 +81,9 @@ class BackupProgressBarDialog(tk.Toplevel):
         self.label_percent = tk.Label(self, text="0%", font=("Arial", 10))
         self.label_percent.pack()
 
-        self.btn_close = tk.Button(self, text="Fermer", font=("Arial", 10, "bold"), bg="#2E7D32", fg="white", state=tk.DISABLED, command=self.destroy)
-        self.btn_close.pack(pady=15)
+        # Bouton neutre (Gris/Standard)
+        self.btn_action = tk.Button(self, text="Annuler", font=("Arial", 9, "bold"), width=12, command=self.on_btn_click)
+        self.btn_action.pack(pady=15)
 
     def update_progress(self, current, total, filename=""):
         percent = int((current / total) * 100) if total > 0 else 100
@@ -89,11 +94,25 @@ class BackupProgressBarDialog(tk.Toplevel):
         self.update()
 
     def complete(self):
+        self.is_finished = True
         self.progress['value'] = 100
         self.label_percent.config(text="100% - Sauvegarde terminée !")
         self.label_status.config(text="Sauvegarde réalisée avec succès.")
-        self.btn_close.config(state=tk.NORMAL)
-        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.btn_action.config(text="Fermer")
+
+    def on_btn_click(self):
+        if self.is_finished:
+            self.destroy()
+        else:
+            self.on_close_attempt()
+
+    def on_close_attempt(self):
+        if self.is_finished:
+            self.destroy()
+        else:
+            if messagebox.askyesno("Confirmation", "Voulez-vous vraiment annuler la sauvegarde en cours ?", parent=self):
+                self.cancelled = True
+                self.destroy()
 
 
 # ==========================================
@@ -156,8 +175,8 @@ class CNCBackupManagerApp(tk.Tk):
         self.minsize(950, 680)
 
         self.tasks = []
+        self.sort_directions = {}
 
-        # Authentification au démarrage
         self.withdraw()
         login = LoginDialog(self)
         self.wait_window(login)
@@ -170,7 +189,6 @@ class CNCBackupManagerApp(tk.Tk):
         self.build_ui()
 
     def build_ui(self):
-        # Barre de menus
         self.menubar = tk.Menu(self)
         self.config(menu=self.menubar)
 
@@ -184,13 +202,11 @@ class CNCBackupManagerApp(tk.Tk):
         menu_help.add_command(label="À propos", command=self.show_about)
         self.menubar.add_cascade(label="Aide", menu=menu_help)
 
-        # En-tête principal
         header_frame = tk.Frame(self, bg="#003366", height=50)
         header_frame.pack(fill=tk.X, side=tk.TOP)
         title_label = tk.Label(header_frame, text=APP_NAME.upper(), font=("Arial", 13, "bold"), fg="white", bg="#003366", pady=10)
         title_label.pack()
 
-        # Système d'onglets
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -241,7 +257,6 @@ class CNCBackupManagerApp(tk.Tk):
         self.combo_type.grid(row=3, column=1, sticky="w", padx=5, pady=5)
         self.combo_type.bind("<<ComboboxSelected>>", self.on_recurrence_change)
 
-        # Jours d'exécution hebdomadaire
         self.label_days = ttk.Label(frame_add, text="Jours actifs (Hebdo) :")
         self.label_days.grid(row=4, column=0, sticky="w", padx=5, pady=3)
 
@@ -257,12 +272,10 @@ class CNCBackupManagerApp(tk.Tk):
             self.days_vars[day] = var
             self.days_checkbuttons.append(chk)
 
-        # Jour du mois pour le mode Mensuel
         ttk.Label(frame_add, text="Jour du mois (1-31) :").grid(row=5, column=0, sticky="w", padx=5, pady=5)
         self.spin_month_day = tk.Spinbox(frame_add, from_=1, to=31, width=5, format="%02.0f", state=tk.DISABLED)
         self.spin_month_day.grid(row=5, column=1, sticky="w", padx=5, pady=5)
 
-        # Heure d'exécution
         ttk.Label(frame_add, text="Heure d'exécution (HH:MM) :").grid(row=6, column=0, sticky="w", padx=5, pady=5)
         time_frame = ttk.Frame(frame_add)
         time_frame.grid(row=6, column=1, sticky="w", padx=5)
@@ -276,7 +289,6 @@ class CNCBackupManagerApp(tk.Tk):
         btn_save = tk.Button(frame_add, text="Enregistrer la Sauvegarde", font=("Arial", 10, "bold"), bg="#2E7D32", fg="white", pady=4, command=self.add_task)
         btn_save.grid(row=7, column=0, columnspan=3, pady=10, sticky="ew", padx=5)
 
-        # Liste des sauvegardes
         frame_list = ttk.LabelFrame(self.tab_backup, text="Liste des Sauvegardes Enregistrées")
         frame_list.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
@@ -303,6 +315,7 @@ class CNCBackupManagerApp(tk.Tk):
         btn_manual = tk.Button(btn_actions, text="Lancer Manuel", font=("Arial", 9, "bold"), bg="#1976D2", fg="white", command=self.run_task_manual)
         btn_manual.pack(fill=tk.X, pady=5)
 
+        # Bouton Supprimer avec message de confirmation
         btn_del = tk.Button(btn_actions, text="Supprimer", font=("Arial", 9, "bold"), bg="#C62828", fg="white", command=self.delete_task)
         btn_del.pack(fill=tk.X, pady=5)
 
@@ -318,7 +331,7 @@ class CNCBackupManagerApp(tk.Tk):
             self.spin_month_day.config(state=tk.DISABLED)
             for chk in self.days_checkbuttons:
                 chk.config(state=tk.NORMAL)
-        else:  # Journalier
+        else:
             self.spin_month_day.config(state=tk.DISABLED)
             for chk in self.days_checkbuttons:
                 chk.config(state=tk.NORMAL)
@@ -396,6 +409,10 @@ class CNCBackupManagerApp(tk.Tk):
         try:
             os.makedirs(target_dir, exist_ok=True)
             for idx, file_path in enumerate(file_list, 1):
+                if progress_dialog.cancelled:
+                    messagebox.showinfo("Annulation", "Sauvegarde annulée par l'utilisateur.")
+                    return
+
                 rel_path = os.path.relpath(file_path, src) if os.path.isdir(src) else os.path.basename(file_path)
                 dest_file_path = os.path.join(target_dir, rel_path)
                 os.makedirs(os.path.dirname(dest_file_path), exist_ok=True)
@@ -411,7 +428,11 @@ class CNCBackupManagerApp(tk.Tk):
 
     def delete_task(self):
         selected = self.tree_tasks.selection()
-        if selected:
+        if not selected:
+            messagebox.showwarning("Sélection requise", "Veuillez sélectionner une sauvegarde à supprimer.")
+            return
+
+        if messagebox.askyesno("Confirmation de suppression", "Êtes-vous sûr de vouloir supprimer cette tâche de sauvegarde ?"):
             self.tree_tasks.delete(selected[0])
 
     # ==========================================
@@ -450,8 +471,9 @@ class CNCBackupManagerApp(tk.Tk):
         cols = ("statut", "fichier", "date_a", "date_b")
         self.tree = ttk.Treeview(frame_grid, columns=cols, show="headings", selectmode="browse")
         
-        self.tree.heading("statut", text="Statut")
-        self.tree.heading("fichier", text="Fichier / Chemin Relatif")
+        # En-têtes cliquables pour le tri par colonne
+        self.tree.heading("statut", text="Statut ↕", command=lambda: self.sort_treeview("statut"))
+        self.tree.heading("fichier", text="Fichier / Chemin Relatif ↕", command=lambda: self.sort_treeview("fichier"))
         self.tree.heading("date_a", text="Date Modification (A)")
         self.tree.heading("date_b", text="Date Modification (B)")
 
@@ -460,7 +482,7 @@ class CNCBackupManagerApp(tk.Tk):
         self.tree.column("date_a", width=180, anchor="center")
         self.tree.column("date_b", width=180, anchor="center")
 
-        # Coloration : ROUGE avec texte BLANC pour statut DIFFERENT
+        # Configuration forcée des styles visuels pour le surlignage ROUGE sous Windows
         self.tree.tag_configure("different_tag", background="#D32F2F", foreground="white")
         self.tree.tag_configure("identique_tag", background="white", foreground="black")
 
@@ -480,6 +502,19 @@ class CNCBackupManagerApp(tk.Tk):
                               bg="#424242", fg="white", font=("Arial", 9, "bold"),
                               command=self.print_a4_formatted)
         btn_print.pack(side=tk.RIGHT, padx=5)
+
+    def sort_treeview(self, col):
+        """ Fonction de tri ascendant/descendant sur les colonnes Statut et Fichier """
+        reverse = self.sort_directions.get(col, False)
+        
+        # Récupération de tous les éléments du tableau
+        items = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
+        items.sort(reverse=reverse)
+
+        for index, (val, k) in enumerate(items):
+            self.tree.move(k, '', index)
+
+        self.sort_directions[col] = not reverse
 
     def browse_dir(self, var):
         path = filedialog.askdirectory()
