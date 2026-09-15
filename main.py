@@ -32,7 +32,7 @@ if __name__ == '__main__':
     multiprocessing.freeze_support()
 
 APP_NAME = "Programme CNC Manager"
-APP_VERSION = "5.0.0"
+APP_VERSION = "6.0.0"
 APP_AUTHOR = "Bouzaien Dhaou"
 
 DB_FILE = "programme_cnc_manager.db"
@@ -168,9 +168,15 @@ def init_db():
 
 
 def load_config():
+    default_dir = os.path.expanduser("~")
     default_config = {
         "password_hash": DEFAULT_PASSWORD_HASH,
-        "default_working_dir": os.path.expanduser("~"),
+        "dir_gcode": default_dir,
+        "dir_csv_catalog": default_dir,
+        "dir_compare_reports": default_dir,
+        "dir_backup_dest": default_dir,
+        "dir_of_exports": default_dir,
+        "dir_tracking_reports": default_dir,
         "use_last_backup_dir": False,
         "last_backup_dir": ""
     }
@@ -328,7 +334,8 @@ class AdvancedPrintDialog(tk.Toplevel):
 
     def _execute_print(self):
         if self.print_mode.get() == "PDF":
-            file_path = filedialog.asksaveasfilename(defaultextension=".html", filetypes=[("Fichier Document (*.html)", "*.html")])
+            cfg = load_config()
+            file_path = filedialog.asksaveasfilename(initialdir=cfg.get("dir_of_exports"), defaultextension=".html", filetypes=[("Fichier Document (*.html)", "*.html")])
             if file_path:
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(self._generate_html())
@@ -356,48 +363,67 @@ class AdvancedPrintDialog(tk.Toplevel):
                 self.destroy()
 
 
+# Dialogue de configuration avancée de tous les répertoires d'entrées / sorties
 class OptionsDialog(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
-        self.title("Configuration des Dossiers et Options")
-        self.geometry("540x260")
+        self.title("Configuration des Dossiers d'Entrées/Sorties et Options")
+        self.geometry("680x420")
         self.resizable(False, False)
         self.grab_set()
 
         self.config = load_config()
+        self._setup_ui()
 
-        ttk.Label(self, text="Dossier de travail par défaut (Programmes G-Code) :", font=("Arial", 9, "bold")).pack(anchor="w", padx=15, pady=(15, 5))
+    def _setup_ui(self):
+        frame_dirs = ttk.LabelFrame(self, text=" Configuration des Répertoires par Défaut ", padding=10)
+        frame_dirs.pack(fill="x", padx=10, pady=10)
 
-        f_dir = ttk.Frame(self)
-        f_dir.pack(fill="x", padx=15, pady=5)
+        labels = [
+            ("Programmes ISO / G-Code (CNC) :", "dir_gcode"),
+            ("Catalogue (Import / Export CSV) :", "dir_csv_catalog"),
+            ("Rapports de Comparaison (Export TXT/CSV) :", "dir_compare_reports"),
+            ("Destination des Sauvegardes :", "dir_backup_dest"),
+            ("Exports Ordres de Fabrication (PDF/HTML) :", "dir_of_exports"),
+            ("Rapports de Traçabilité Usinage :", "dir_tracking_reports"),
+        ]
 
-        self.entry_dir = ttk.Entry(f_dir, width=50)
-        self.entry_dir.insert(0, self.config.get("default_working_dir", ""))
-        self.entry_dir.pack(side="left", padx=(0, 5))
+        self.entries = {}
 
-        ttk.Button(f_dir, text="Parcourir", command=self.browse_dir).pack(side="left")
+        for i, (label_text, key) in enumerate(labels):
+            ttk.Label(frame_dirs, text=label_text).grid(row=i, column=0, sticky="w", padx=5, pady=3)
+            e = ttk.Entry(frame_dirs, width=45)
+            e.insert(0, self.config.get(key, ""))
+            e.grid(row=i, column=1, padx=5, pady=3)
+            btn = ttk.Button(frame_dirs, text="Parcourir", command=lambda _e=e: self.browse_folder(_e))
+            btn.grid(row=i, column=2, padx=5, pady=3)
+            self.entries[key] = e
+
+        frame_opts = ttk.LabelFrame(self, text=" Options Spéciales ", padding=10)
+        frame_opts.pack(fill="x", padx=10, pady=5)
 
         self.var_use_last = tk.BooleanVar(value=self.config.get("use_last_backup_dir", False))
-        chk = ttk.Checkbutton(self, text="Sélection automatique : Prendre par défaut le dossier de la dernière sauvegarde", variable=self.var_use_last)
-        chk.pack(anchor="w", padx=15, pady=12)
+        chk = ttk.Checkbutton(frame_opts, text="Sélection automatique : Prendre par défaut le dossier de la dernière sauvegarde", variable=self.var_use_last)
+        chk.pack(anchor="w", padx=5, pady=5)
 
         f_btn = ttk.Frame(self)
-        f_btn.pack(side="bottom", fill="x", pady=15, padx=15)
+        f_btn.pack(side="bottom", fill="x", pady=15, padx=10)
 
         ttk.Button(f_btn, text="Enregistrer", command=self.save).pack(side="right", padx=5)
         ttk.Button(f_btn, text="Annuler", command=self.destroy).pack(side="right", padx=5)
 
-    def browse_dir(self):
+    def browse_folder(self, entry_widget):
         d = filedialog.askdirectory()
         if d:
-            self.entry_dir.delete(0, tk.END)
-            self.entry_dir.insert(0, d)
+            entry_widget.delete(0, tk.END)
+            entry_widget.insert(0, d)
 
     def save(self):
-        self.config["default_working_dir"] = self.entry_dir.get().strip()
+        for key, entry in self.entries.items():
+            self.config[key] = entry.get().strip()
         self.config["use_last_backup_dir"] = self.var_use_last.get()
         save_config(self.config)
-        messagebox.showinfo("Succès", "Options enregistrées.", parent=self)
+        messagebox.showinfo("Succès", "Configuration des dossiers enregistrée avec succès.", parent=self)
         self.destroy()
 
 
@@ -621,7 +647,7 @@ class ModelSearchDialog(tk.Toplevel):
 
 
 # ==========================================
-# 3. APPLICATION PRINCIPALE
+# 3. APPLICATION PRINCIPALE TKINTER
 # ==========================================
 
 class CNCApplication(tk.Tk):
@@ -697,7 +723,6 @@ class CNCApplication(tk.Tk):
         self.title(f"{APP_NAME} - Session : {self.current_user['username']} [{self.current_user['role']}]")
         self.geometry("1280x780")
 
-        # Menus Principaux
         menubar = tk.Menu(self)
 
         menu_file = tk.Menu(menubar, tearoff=0)
@@ -883,7 +908,7 @@ class CNCApplication(tk.Tk):
         p_name = m_vals[1]
 
         cfg = load_config()
-        work_dir = cfg.get("default_working_dir", os.path.expanduser("~"))
+        work_dir = cfg.get("dir_gcode", os.path.expanduser("~"))
         if cfg.get("use_last_backup_dir", False) and cfg.get("last_backup_dir"):
             work_dir = cfg["last_backup_dir"]
 
@@ -917,7 +942,8 @@ class CNCApplication(tk.Tk):
             self.load_catalog_data()
 
     def import_usi_tab_csv(self):
-        file_path = filedialog.askopenfilename(title="Sélectionner Usi-Tab.csv", filetypes=[("Fichiers CSV", "*.csv"), ("Tous", "*.*")])
+        cfg = load_config()
+        file_path = filedialog.askopenfilename(initialdir=cfg.get("dir_csv_catalog"), title="Sélectionner Usi-Tab.csv", filetypes=[("Fichiers CSV", "*.csv"), ("Tous", "*.*")])
         if not file_path:
             return
         try:
@@ -969,7 +995,8 @@ class CNCApplication(tk.Tk):
             messagebox.showerror("Erreur", f"Erreur lors de l'importation :\n{str(e)}")
 
     def export_catalog_csv(self):
-        file_path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("Fichiers CSV", "*.csv")])
+        cfg = load_config()
+        file_path = filedialog.asksaveasfilename(initialdir=cfg.get("dir_csv_catalog"), defaultextension=".csv", filetypes=[("Fichiers CSV", "*.csv")])
         if not file_path:
             return
         conn = sqlite3.connect(DB_FILE)
@@ -1050,7 +1077,7 @@ class CNCApplication(tk.Tk):
             self.load_catalog_data()
 
     # ==========================================
-    # ONGLET 2 : COMPARAISON DE DOSSIERS ET FICHIERS
+    # ONGLET 2 : COMPARAISON DOSSIERS & WINMERGE FICHIERS
     # ==========================================
     def setup_compare_tab(self, parent):
         sub_nb = ttk.Notebook(parent)
@@ -1060,9 +1087,9 @@ class CNCApplication(tk.Tk):
         tab_file_comp = ttk.Frame(sub_nb)
 
         sub_nb.add(tab_folder_comp, text=" Comparaison globale de Dossiers (A/B) ")
-        sub_nb.add(tab_file_comp, text=" Comparaison côte-à-côte de Fichiers (Diff) ")
+        sub_nb.add(tab_file_comp, text=" Comparaison côte-à-côte de Fichiers (Style WinMerge) ")
 
-        # --- SOUS-ONGLET 1 : COMPARAISON DE DOSSIERS A/B ---
+        # --- 1. DOSSIERS A/B ---
         frame_dirs = ttk.LabelFrame(tab_folder_comp, text=" Sélection des dossiers à comparer ")
         frame_dirs.pack(fill=tk.X, padx=10, pady=5)
 
@@ -1118,8 +1145,8 @@ class CNCApplication(tk.Tk):
         ttk.Button(frame_bottom, text="Exporter en Excel (.csv)", command=self.export_csv).pack(side=tk.LEFT, padx=5)
         tk.Button(frame_bottom, text="🖨️ Imprimer Rapport A4", bg="#424242", fg="white", font=("Arial", 9, "bold"), command=self.print_a4_formatted).pack(side=tk.RIGHT, padx=5)
 
-        # --- SOUS-ONGLET 2 : COMPARAISON FICHIERS CÔTE-À-CÔTE ---
-        frame_f_top = ttk.LabelFrame(tab_file_comp, text=" Sélection des fichiers à comparer côte-à-côte ")
+        # --- 2. FICHIERS WINMERGE SYNCHRONISÉS ---
+        frame_f_top = ttk.LabelFrame(tab_file_comp, text=" Sélection des fichiers G-Code à comparer ")
         frame_f_top.pack(fill="x", padx=10, pady=5)
 
         ttk.Label(frame_f_top, text="Fichier A :").grid(row=0, column=0, padx=5, pady=3)
@@ -1137,22 +1164,23 @@ class CNCApplication(tk.Tk):
 
         tk.Button(f_nav, text="🔍 Comparer Fichiers Texte", bg="#0288D1", fg="white", font=("Arial", 9, "bold"), command=self.compare_files_side_by_side).pack(side="left", padx=5)
 
-        self.btn_prev_diff = ttk.Button(f_nav, text="▲ Précédent", command=self.prev_diff, state=tk.DISABLED)
+        self.btn_prev_diff = ttk.Button(f_nav, text="▲ Différence Précédente", command=self.prev_diff, state=tk.DISABLED)
         self.btn_prev_diff.pack(side="left", padx=5)
 
-        self.btn_next_diff = ttk.Button(f_nav, text="▼ Suivant", command=self.next_diff, state=tk.DISABLED)
+        self.btn_next_diff = ttk.Button(f_nav, text="▼ Différence Suivante", command=self.next_diff, state=tk.DISABLED)
         self.btn_next_diff.pack(side="left", padx=5)
 
         self.lbl_diff_count = ttk.Label(f_nav, text="Aucune comparaison", font=("Arial", 9, "bold"))
         self.lbl_diff_count.pack(side="right", padx=10)
 
+        # Panneau divisé pour affichage synchro
         frame_split = ttk.Frame(tab_file_comp)
         frame_split.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
         f_left = ttk.LabelFrame(frame_split, text=" Fichier A ")
         f_left.pack(side="left", fill=tk.BOTH, expand=True)
         self.txt_file_a = tk.Text(f_left, wrap="none", font=("Courier", 9))
-        self.txt_file_a.pack(fill=tk.BOTH, expand=True)
+        self.txt_file_a.pack(side="left", fill=tk.BOTH, expand=True)
 
         f_mid = ttk.Frame(frame_split, width=20, bg="#E0E0E0")
         f_mid.pack(side="left", fill=tk.Y, padx=2)
@@ -1161,18 +1189,30 @@ class CNCApplication(tk.Tk):
         f_right = ttk.LabelFrame(frame_split, text=" Fichier B ")
         f_right.pack(side="left", fill=tk.BOTH, expand=True)
         self.txt_file_b = tk.Text(f_right, wrap="none", font=("Courier", 9))
-        self.txt_file_b.pack(fill=tk.BOTH, expand=True)
+        self.txt_file_b.pack(side="left", fill=tk.BOTH, expand=True)
+
+        scrollbar_synchro = ttk.Scrollbar(frame_split, orient=tk.VERTICAL, command=self._on_synchro_scroll)
+        scrollbar_synchro.pack(side="right", fill=tk.Y)
+
+        self.txt_file_a.configure(yscrollcommand=scrollbar_synchro.set)
+        self.txt_file_b.configure(yscrollcommand=scrollbar_synchro.set)
 
         self.txt_file_a.tag_config("diff", background="#FFCDD2", foreground="#B71C1C")
         self.txt_file_b.tag_config("diff", background="#FFCDD2", foreground="#B71C1C")
 
+    def _on_synchro_scroll(self, *args):
+        self.txt_file_a.yview(*args)
+        self.txt_file_b.yview(*args)
+
     def browse_dir(self, var):
-        p = filedialog.askdirectory()
+        cfg = load_config()
+        p = filedialog.askdirectory(initialdir=cfg.get("dir_gcode"))
         if p:
             var.set(p)
 
     def browse_file(self, var):
-        f = filedialog.askopenfilename(filetypes=[("Programme G-Code", "*.iso *.nc *.txt"), ("Tous", "*.*")])
+        cfg = load_config()
+        f = filedialog.askopenfilename(initialdir=cfg.get("dir_gcode"), filetypes=[("Programme G-Code", "*.iso *.nc *.txt *.A.P"), ("Tous", "*.*")])
         if f:
             var.set(f)
 
@@ -1235,7 +1275,8 @@ class CNCApplication(tk.Tk):
         return datetime.datetime.fromtimestamp(os.path.getmtime(path)).strftime('%Y-%m-%d %H:%M:%S')
 
     def export_txt(self):
-        path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Texte", "*.txt")])
+        cfg = load_config()
+        path = filedialog.asksaveasfilename(initialdir=cfg.get("dir_compare_reports"), defaultextension=".txt", filetypes=[("Texte", "*.txt")])
         if path:
             with open(path, "w", encoding="utf-8") as f:
                 for item in self.tree_comp.get_children():
@@ -1243,7 +1284,8 @@ class CNCApplication(tk.Tk):
             messagebox.showinfo("Export", "Export TXT réussi !")
 
     def export_csv(self):
-        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+        cfg = load_config()
+        path = filedialog.asksaveasfilename(initialdir=cfg.get("dir_compare_reports"), defaultextension=".csv", filetypes=[("CSV", "*.csv")])
         if path:
             with open(path, "w", newline="", encoding="utf-8-sig") as f:
                 writer = csv.writer(f, delimiter=";")
@@ -1388,8 +1430,8 @@ class CNCApplication(tk.Tk):
     # ONGLET 3 : PLANIFICATION ET SAUVEGARDES
     # ==========================================
     def setup_backup_tab(self, parent):
-        frame_add = ttk.LabelFrame(parent, text="Ajouter / Configurer une Sauvegarde")
-        frame_add.pack(fill=tk.X, padx=10, pady=5)
+        frame_add = ttk.LabelFrame(parent, text=" Ajouter / Configurer une Sauvegarde ")
+        frame_add.pack(fill="x", padx=10, pady=5)
 
         ttk.Label(frame_add, text="Nom de la sauvegarde :").grid(row=0, column=0, sticky="w", padx=5, pady=3)
         self.entry_task_name = ttk.Entry(frame_add, width=45)
@@ -1413,8 +1455,8 @@ class CNCApplication(tk.Tk):
         btn_save = tk.Button(frame_add, text="Enregistrer la Sauvegarde", font=("Arial", 10, "bold"), bg="#2E7D32", fg="white", pady=4, command=self.add_task)
         btn_save.grid(row=4, column=0, columnspan=3, pady=10, sticky="ew", padx=5)
 
-        frame_list = ttk.LabelFrame(parent, text="Liste des Sauvegardes Enregistrées")
-        frame_list.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        frame_list = ttk.LabelFrame(parent, text=" Liste des Sauvegardes Enregistrées ")
+        frame_list.pack(fill="both", expand=True, padx=10, pady=5)
 
         columns = ("name", "src", "dest", "type")
         self.tree_tasks = ttk.Treeview(frame_list, columns=columns, show="headings", height=6)
@@ -1423,7 +1465,7 @@ class CNCApplication(tk.Tk):
         self.tree_tasks.heading("dest", text="Destination")
         self.tree_tasks.heading("type", text="Récurrence")
 
-        self.tree_tasks.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=5, pady=5)
+        self.tree_tasks.pack(fill="both", expand=True, side=tk.LEFT, padx=5, pady=5)
 
         btn_actions = ttk.Frame(frame_list)
         btn_actions.pack(fill=tk.Y, side=tk.RIGHT, padx=5, pady=5)
@@ -1435,13 +1477,15 @@ class CNCApplication(tk.Tk):
         btn_del.pack(fill=tk.X, pady=5)
 
     def browse_src(self):
-        p = filedialog.askdirectory()
+        cfg = load_config()
+        p = filedialog.askdirectory(initialdir=cfg.get("dir_gcode"))
         if p:
             self.entry_src.delete(0, tk.END)
             self.entry_src.insert(0, p)
 
     def browse_dest(self):
-        p = filedialog.askdirectory()
+        cfg = load_config()
+        p = filedialog.askdirectory(initialdir=cfg.get("dir_backup_dest"))
         if p:
             self.entry_dest.delete(0, tk.END)
             self.entry_dest.insert(0, p)
@@ -2002,7 +2046,8 @@ class CNCApplication(tk.Tk):
         ttk.Button(frame_send, text="🚀 ENVOYER / EXECUTER SUR NUM 1060 (RS232)", command=self.send_to_cnc).pack(fill="x", ipady=5)
 
     def open_gcode_file(self):
-        path = filedialog.askopenfilename(filetypes=[("Programme CNC", "*.iso *.nc *.txt"), ("Tous", "*.*")])
+        cfg = load_config()
+        path = filedialog.askopenfilename(initialdir=cfg.get("dir_gcode"), filetypes=[("Programme CNC", "*.iso *.nc *.txt *.A.P"), ("Tous", "*.*")])
         if path:
             self.lbl_file.config(text=f"Fichier : {os.path.basename(path)}")
             with open(path, "r", encoding="latin1") as f:
