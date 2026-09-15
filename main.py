@@ -12,9 +12,9 @@ import time
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 
-# Informations de l'application
-APP_NAME = "Gestionnaire de Sauvegarde des Programmes CNC"
-APP_VERSION = "2.1.0"
+# Nom Officiel mis à jour
+APP_NAME = "Gestionnaire programme CNC"
+APP_VERSION = "2.2.0"
 APP_AUTHOR = "Bouzaien Dhaou"
 APP_EMAIL = "bouzaien.dhaou@gmail.com"
 DATE_CREATED = "14/09/2026"
@@ -36,23 +36,23 @@ except ImportError:
 
 def load_config():
     if not os.path.exists(CONFIG_FILE):
-        config = {"password_hash": DEFAULT_PASSWORD_HASH}
+        config = {"password_hash": DEFAULT_PASSWORD_HASH, "mapping_db": {}}
         save_config(config)
         return config
     try:
-        with open(CONFIG_FILE, "r") as f:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
-        return {"password_hash": DEFAULT_PASSWORD_HASH}
+        return {"password_hash": DEFAULT_PASSWORD_HASH, "mapping_db": {}}
 
 
 def save_config(config):
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(config, f)
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
 
 
 # ==========================================
-# BOÎTE DE PROGRESSION ET D'ANNULATION
+# FENÊTRE DE PROGRESSION DE SAUVEGARDE
 # ==========================================
 class BackupProgressBarDialog(tk.Toplevel):
     def __init__(self, parent, title="Sauvegarde en cours..."):
@@ -65,7 +65,6 @@ class BackupProgressBarDialog(tk.Toplevel):
         self.cancelled = False
         self.is_finished = False
 
-        # Gestion de la croix rouge de fermeture
         self.protocol("WM_DELETE_WINDOW", self.on_close_attempt)
 
         self.label_status = tk.Label(self, text="Préparation de la sauvegarde...", font=("Arial", 10, "bold"))
@@ -81,7 +80,6 @@ class BackupProgressBarDialog(tk.Toplevel):
         self.label_percent = tk.Label(self, text="0%", font=("Arial", 10))
         self.label_percent.pack()
 
-        # Bouton neutre (Gris/Standard)
         self.btn_action = tk.Button(self, text="Annuler", font=("Arial", 9, "bold"), width=12, command=self.on_btn_click)
         self.btn_action.pack(pady=15)
 
@@ -116,7 +114,7 @@ class BackupProgressBarDialog(tk.Toplevel):
 
 
 # ==========================================
-# BOÎTE DE DIALOGUE D'AUTHENTIFICATION
+# AUTHENTIFICATION
 # ==========================================
 class LoginDialog(tk.Toplevel):
     def __init__(self, parent):
@@ -129,7 +127,7 @@ class LoginDialog(tk.Toplevel):
 
         self.config = load_config()
 
-        lbl = tk.Label(self, text="Gestionnaire de Sauvegarde CNC", font=("Arial", 11, "bold"))
+        lbl = tk.Label(self, text=APP_NAME, font=("Arial", 11, "bold"))
         lbl.pack(pady=12)
 
         lbl_pass = tk.Label(self, text="Entrez le mot de passe d'accès :")
@@ -171,8 +169,11 @@ class CNCBackupManagerApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_NAME)
-        self.geometry("1020x720")
-        self.minsize(950, 680)
+        self.geometry("1080x740")
+        self.minsize(980, 680)
+
+        self.config_data = load_config()
+        self.mapping_db = self.config_data.get("mapping_db", {})  # Dictionnaire {Programme: Model}
 
         self.tasks = []
         self.sort_directions = {}
@@ -216,8 +217,12 @@ class CNCBackupManagerApp(tk.Tk):
         self.tab_compare = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_compare, text=" Comparaison de Dossiers ")
 
+        self.tab_mapping = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_mapping, text=" Liste programme usinage ")
+
         self.setup_backup_tab()
         self.setup_compare_tab()
+        self.setup_mapping_tab()
 
     def show_about(self):
         about_text = (
@@ -231,7 +236,7 @@ class CNCBackupManagerApp(tk.Tk):
         messagebox.showinfo("À propos", about_text)
 
     # ==========================================
-    # ONGLET 1 : SAUVEGARDE ET PLANIFICATION
+    # ONGLET 1 : SAUVEGARDE & PLANIFICATION
     # ==========================================
     def setup_backup_tab(self):
         frame_add = ttk.LabelFrame(self.tab_backup, text="Ajouter / Configurer une Sauvegarde")
@@ -315,7 +320,6 @@ class CNCBackupManagerApp(tk.Tk):
         btn_manual = tk.Button(btn_actions, text="Lancer Manuel", font=("Arial", 9, "bold"), bg="#1976D2", fg="white", command=self.run_task_manual)
         btn_manual.pack(fill=tk.X, pady=5)
 
-        # Bouton Supprimer avec message de confirmation
         btn_del = tk.Button(btn_actions, text="Supprimer", font=("Arial", 9, "bold"), bg="#C62828", fg="white", command=self.delete_task)
         btn_del.pack(fill=tk.X, pady=5)
 
@@ -468,21 +472,23 @@ class CNCBackupManagerApp(tk.Tk):
         frame_grid = ttk.LabelFrame(self.tab_compare, text="Résultats de la comparaison")
         frame_grid.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        cols = ("statut", "fichier", "date_a", "date_b")
+        # Nouvelle disposition de colonnes : Nom de model en premier
+        cols = ("model", "fichier", "statut", "date_a", "date_b")
         self.tree = ttk.Treeview(frame_grid, columns=cols, show="headings", selectmode="browse")
         
-        # En-têtes cliquables pour le tri par colonne
+        self.tree.heading("model", text="Nom de model ↕", command=lambda: self.sort_treeview("model"))
+        self.tree.heading("fichier", text="Nom Prog. (Fichier/Chemin) ↕", command=lambda: self.sort_treeview("fichier"))
         self.tree.heading("statut", text="Statut ↕", command=lambda: self.sort_treeview("statut"))
-        self.tree.heading("fichier", text="Fichier / Chemin Relatif ↕", command=lambda: self.sort_treeview("fichier"))
         self.tree.heading("date_a", text="Date Modification (A)")
         self.tree.heading("date_b", text="Date Modification (B)")
 
-        self.tree.column("statut", width=120, anchor="center")
-        self.tree.column("fichier", width=400, anchor="w")
-        self.tree.column("date_a", width=180, anchor="center")
-        self.tree.column("date_b", width=180, anchor="center")
+        self.tree.column("model", width=140, anchor="w")
+        self.tree.column("fichier", width=280, anchor="w")
+        self.tree.column("statut", width=110, anchor="center")
+        self.tree.column("date_a", width=170, anchor="center")
+        self.tree.column("date_b", width=170, anchor="center")
 
-        # Configuration forcée des styles visuels pour le surlignage ROUGE sous Windows
+        # Configuration visuelle explicite des lignes
         self.tree.tag_configure("different_tag", background="#D32F2F", foreground="white")
         self.tree.tag_configure("identique_tag", background="white", foreground="black")
 
@@ -503,11 +509,24 @@ class CNCBackupManagerApp(tk.Tk):
                               command=self.print_a4_formatted)
         btn_print.pack(side=tk.RIGHT, padx=5)
 
+    def find_model_name_for_file(self, filename):
+        """ Recherche le Nom de Modèle associé au fichier usinage """
+        base_file = os.path.basename(filename).upper()
+
+        # 1. Recherche directe dans la base importée
+        for prog, model in self.mapping_db.items():
+            if prog.upper() and (prog.upper() in base_file or base_file.startswith(prog.upper())):
+                return model
+
+        # 2. Heuristique basique par déduction du radical
+        clean_name = base_file.split('.')[0]
+        if clean_name in self.mapping_db:
+            return self.mapping_db[clean_name]
+
+        return "-"
+
     def sort_treeview(self, col):
-        """ Fonction de tri ascendant/descendant sur les colonnes Statut et Fichier """
         reverse = self.sort_directions.get(col, False)
-        
-        # Récupération de tous les éléments du tableau
         items = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
         items.sort(reverse=reverse)
 
@@ -515,11 +534,6 @@ class CNCBackupManagerApp(tk.Tk):
             self.tree.move(k, '', index)
 
         self.sort_directions[col] = not reverse
-
-    def browse_dir(self, var):
-        path = filedialog.askdirectory()
-        if path:
-            var.set(path)
 
     def run_comparison(self, deep=False):
         dir_a = self.var_dir_a.get().strip()
@@ -558,9 +572,113 @@ class CNCBackupManagerApp(tk.Tk):
             else:
                 statut = "DIFFERENT"
 
-            tag = "different_tag" if statut == "DIFFERENT" else "identique_tag"
-            self.tree.insert("", tk.END, values=(statut, rel, date_a_str, date_b_str), tags=(tag,))
+            # Recherche du modèle
+            model_name = self.find_model_name_for_file(rel)
 
+            tag = "different_tag" if statut == "DIFFERENT" else "identique_tag"
+            self.tree.insert("", tk.END, values=(model_name, rel, statut, date_a_str, date_b_str), tags=(tag,))
+
+    # ==========================================
+    # ONGLET 3 : LISTE PROGRAMME USINAGE
+    # ==========================================
+    def setup_mapping_tab(self):
+        frame_top = ttk.LabelFrame(self.tab_mapping, text="Gestion de la Base Liste Programme Usinage")
+        frame_top.pack(fill=tk.X, padx=10, pady=5)
+
+        ttk.Label(frame_top, text="Importer/Mettre à jour à partir d'un fichier XLS/CSV (ex: Usi-Tab -01.xlsx) :").pack(side=tk.LEFT, padx=10, pady=10)
+        
+        btn_import = tk.Button(frame_top, text="📥 Importer Fichier (CSV/Excel)", font=("Arial", 9, "bold"), bg="#0288D1", fg="white", command=self.import_mapping_file)
+        btn_import.pack(side=tk.LEFT, padx=5, pady=10)
+
+        btn_export = tk.Button(frame_top, text="📤 Exporter Base (CSV)", font=("Arial", 9), command=self.export_mapping_file)
+        btn_export.pack(side=tk.LEFT, padx=5, pady=10)
+
+        # Tableau d'affichage de la base
+        frame_grid = ttk.LabelFrame(self.tab_mapping, text="Programmes Usinage et Modèles Associés Enregistrés")
+        frame_grid.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        cols = ("model", "prog", "plaque_su", "plaque_so")
+        self.tree_mapping = ttk.Treeview(frame_grid, columns=cols, show="headings")
+        self.tree_mapping.heading("model", text="Nom Model")
+        self.tree_mapping.heading("prog", text="Nom Programme Pain")
+        self.tree_mapping.heading("plaque_su", text="PLAQUE 2su")
+        self.tree_mapping.heading("plaque_so", text="PLAQUE 2so")
+
+        self.tree_mapping.column("model", width=200, anchor="w")
+        self.tree_mapping.column("prog", width=200, anchor="w")
+        self.tree_mapping.column("plaque_su", width=180, anchor="center")
+        self.tree_mapping.column("plaque_so", width=180, anchor="center")
+
+        scrollbar_map = ttk.Scrollbar(frame_grid, orient=tk.VERTICAL, command=self.tree_mapping.yview)
+        self.tree_mapping.configure(yscrollcommand=scrollbar_map.set)
+
+        self.tree_mapping.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar_map.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.refresh_mapping_tree()
+
+    def import_mapping_file(self):
+        file_path = filedialog.askopenfilename(filetypes=[("Fichiers Excel/CSV", "*.xlsx;*.xls;*.csv"), ("Tous", "*.*")])
+        if not file_path:
+            return
+
+        try:
+            count = 0
+            if file_path.endswith(('.xlsx', '.xls')):
+                import pandas as pd
+                df = pd.read_excel(file_path)
+                for _, row in df.iterrows():
+                    model = str(row.get('Nom Model', '')).strip()
+                    prog = str(row.get('Nom Programme pain', '')).strip()
+                    psu = str(row.get('PLAQUE 2su', '')).strip()
+                    pso = str(row.get('PLAQUE 2so', '')).strip()
+
+                    if prog and prog != 'nan':
+                        self.mapping_db[prog] = model
+                        count += 1
+                    if psu and psu not in ['nan', 'manuelle', '-']:
+                        self.mapping_db[psu] = model
+                    if pso and pso not in ['nan', 'manuelle', '-']:
+                        self.mapping_db[pso] = model
+
+            elif file_path.endswith('.csv'):
+                with open(file_path, mode='r', encoding='utf-8-sig') as f:
+                    reader = csv.DictReader(f, delimiter=';')
+                    for row in reader:
+                        model = row.get('Nom Model', '').strip()
+                        prog = row.get('Nom Programme pain', '').strip()
+                        if prog:
+                            self.mapping_db[prog] = model
+                            count += 1
+
+            self.config_data["mapping_db"] = self.mapping_db
+            save_config(self.config_data)
+            self.refresh_mapping_tree()
+            messagebox.showinfo("Importation réussie", f"{count} associations programmes/modèles chargées avec succès.")
+
+        except Exception as e:
+            messagebox.showerror("Erreur d'importation", f"Impossible de lire le fichier :\n{str(e)}")
+
+    def export_mapping_file(self):
+        file_path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+        if file_path:
+            with open(file_path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f, delimiter=";")
+                writer.writerow(["Nom Programme pain / Fichier", "Nom Model"])
+                for prog, model in self.mapping_db.items():
+                    writer.writerow([prog, model])
+            messagebox.showinfo("Exportation", "Base exportée avec succès.")
+
+    def refresh_mapping_tree(self):
+        for item in self.tree_mapping.get_children():
+            self.tree_mapping.delete(item)
+
+        for prog, model in self.mapping_db.items():
+            self.tree_mapping.insert("", tk.END, values=(model, prog, "-", "-"))
+
+    # ==========================================
+    # FONCTIONS UTILITAIRES & IMPRESSION
+    # ==========================================
     def get_file_date(self, path):
         mtime = os.path.getmtime(path)
         return datetime.datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')
@@ -580,7 +698,6 @@ class CNCBackupManagerApp(tk.Tk):
             save_config(cfg)
             messagebox.showinfo("Succès", "Mot de passe modifié avec succès !")
 
-    # --- IMPRESSION FORMAT A4 PORTRAIT AUTO-AJUSTABLE ---
     def print_a4_formatted(self):
         items = self.tree.get_children()
         if not items:
@@ -604,12 +721,13 @@ class CNCBackupManagerApp(tk.Tk):
         cell_style_bold = ParagraphStyle('CellStyleBold', fontName='Helvetica-Bold', fontSize=7, leading=8, textColor=colors.white)
 
         elements = []
-        elements.append(Paragraph("<b>RAPPORT DE COMPARAISON DES PROGRAMMES CNC</b>", title_style))
+        elements.append(Paragraph(f"<b>RAPPORT DE COMPARAISON - {APP_NAME.upper()}</b>", title_style))
         elements.append(Spacer(1, 10))
 
         data = [[
+            Paragraph("<b>Nom Model</b>", cell_style_bold),
+            Paragraph("<b>Nom Prog. (Fichier)</b>", cell_style_bold),
             Paragraph("<b>Statut</b>", cell_style_bold),
-            Paragraph("<b>Fichier / Chemin Relatif</b>", cell_style_bold),
             Paragraph("<b>Date Modification (A)</b>", cell_style_bold),
             Paragraph("<b>Date Modification (B)</b>", cell_style_bold)
         ]]
@@ -624,26 +742,28 @@ class CNCBackupManagerApp(tk.Tk):
         ]
 
         for i, r in enumerate(rows, start=1):
-            statut, fichier, date_a, date_b = r
+            model, fichier, statut, date_a, date_b = r
             
-            p_statut = Paragraph(f"<b>{statut}</b>", cell_style)
+            p_model = Paragraph(model, cell_style)
             p_fichier = Paragraph(fichier, cell_style)
+            p_statut = Paragraph(f"<b>{statut}</b>", cell_style)
             p_date_a = Paragraph(date_a, cell_style)
             p_date_b = Paragraph(date_b, cell_style)
 
-            data.append([p_statut, p_fichier, p_date_a, p_date_b])
+            data.append([p_model, p_fichier, p_statut, p_date_a, p_date_b])
 
             if statut == "DIFFERENT":
                 table_styles.append(('BACKGROUND', (0, i), (-1, i), colors.HexColor("#D32F2F")))
                 cell_white = ParagraphStyle('CellW', parent=cell_style, textColor=colors.white)
                 data[i] = [
-                    Paragraph(f"<b>{statut}</b>", cell_white),
+                    Paragraph(model, cell_white),
                     Paragraph(fichier, cell_white),
+                    Paragraph(f"<b>{statut}</b>", cell_white),
                     Paragraph(date_a, cell_white),
                     Paragraph(date_b, cell_white)
                 ]
 
-        t = Table(data, colWidths=[70, 260, 110, 110])
+        t = Table(data, colWidths=[90, 180, 70, 105, 105])
         t.setStyle(TableStyle(table_styles))
         elements.append(t)
 
@@ -653,36 +773,38 @@ class CNCBackupManagerApp(tk.Tk):
     def generate_html_print(self, rows):
         html_filename = os.path.join(tempfile.gettempdir(), "rapport_cnc_a4.html")
         
-        html_content = """
+        html_content = f"""
         <!DOCTYPE html>
         <html>
         <head>
             <meta charset="utf-8">
             <title>Rapport CNC A4</title>
             <style>
-                @page { size: A4 portrait; margin: 10mm; }
-                body { font-family: Arial, sans-serif; font-size: 9pt; margin: 0; }
-                h2 { text-align: center; margin-bottom: 15px; font-size: 12pt; }
-                table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-                th, td { border: 1px solid #666; padding: 4px 6px; word-wrap: break-word; font-size: 8pt; }
-                th { background-color: #0B3C5D; color: white; text-align: left; }
-                tr.different { background-color: #D32F2F !important; color: white !important; font-weight: bold; }
-                col.c1 { width: 15%; }
-                col.c2 { width: 45%; }
-                col.c3 { width: 20%; }
-                col.c4 { width: 20%; }
+                @page {{ size: A4 portrait; margin: 10mm; }}
+                body {{ font-family: Arial, sans-serif; font-size: 9pt; margin: 0; }}
+                h2 {{ text-align: center; margin-bottom: 15px; font-size: 12pt; }}
+                table {{ width: 100%; border-collapse: collapse; table-layout: fixed; }}
+                th, td {{ border: 1px solid #666; padding: 4px 6px; word-wrap: break-word; font-size: 8pt; }}
+                th {{ background-color: #0B3C5D; color: white; text-align: left; }}
+                tr.different {{ background-color: #D32F2F !important; color: white !important; font-weight: bold; }}
+                col.c1 {{ width: 20%; }}
+                col.c2 {{ width: 35%; }}
+                col.c3 {{ width: 15%; }}
+                col.c4 {{ width: 15%; }}
+                col.c5 {{ width: 15%; }}
             </style>
         </head>
         <body onload="window.print();">
-            <h2>RAPPORT DE COMPARAISON DES PROGRAMMES CNC</h2>
+            <h2>RAPPORT DE COMPARAISON - {APP_NAME.upper()}</h2>
             <table>
                 <colgroup>
-                    <col class="c1"><col class="c2"><col class="c3"><col class="c4">
+                    <col class="c1"><col class="c2"><col class="c3"><col class="c4"><col class="c5">
                 </colgroup>
                 <thead>
                     <tr>
+                        <th>Nom Model</th>
+                        <th>Nom Prog. (Fichier)</th>
                         <th>Statut</th>
-                        <th>Fichier / Chemin Relatif</th>
                         <th>Date Modification (A)</th>
                         <th>Date Modification (B)</th>
                     </tr>
@@ -690,12 +812,13 @@ class CNCBackupManagerApp(tk.Tk):
                 <tbody>
         """
         for r in rows:
-            statut, fichier, date_a, date_b = r
+            model, fichier, statut, date_a, date_b = r
             row_class = "different" if statut == "DIFFERENT" else ""
             html_content += f"""
                 <tr class="{row_class}">
-                    <td>{statut}</td>
+                    <td>{model}</td>
                     <td>{fichier}</td>
+                    <td>{statut}</td>
                     <td>{date_a}</td>
                     <td>{date_b}</td>
                 </tr>
@@ -725,10 +848,10 @@ class CNCBackupManagerApp(tk.Tk):
         if path:
             with open(path, "w", newline="", encoding="utf-8-sig") as f:
                 writer = csv.writer(f, delimiter=";")
-                writer.writerow(["Statut", "Fichier", "Date A", "Date B"])
+                writer.writerow(["Nom Model", "Nom Programme pain / Fichier", "Statut", "Date A", "Date B"])
                 for item in self.tree.get_children():
                     writer.writerow(self.tree.item(item, "values"))
-            messagebox.showinfo("Export", "Export CSV/Excel réussi !")
+            messagebox.showinfo("Export", "Export CSV réussi !")
 
 
 if __name__ == "__main__":
