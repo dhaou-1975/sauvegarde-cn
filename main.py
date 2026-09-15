@@ -1,4 +1,4 @@
-[cite: 3]import sys
+import sys
 import os
 import csv
 import sqlite3
