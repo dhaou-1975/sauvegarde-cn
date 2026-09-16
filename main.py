@@ -330,7 +330,8 @@ class CNCManagerApp:
         if selected:
             item_values = self.tree_programs.item(selected[0], 'values')
             path = item_values[3]
-            messagebox.showinfo("Visualisation", fOuverture fictive ou lecture du fichier :\n{path}")
+            messagebox.showinfo("Visualisation", f"Ouverture fictive ou lecture du fichier :\n{path}")
+            
 
     def delete_program_entry(self):
         selected = self.tree_programs.selection()
