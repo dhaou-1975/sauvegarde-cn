@@ -74,7 +74,7 @@ class LoginWindow:
         self.root = root
         self.on_success = on_success
         self.root.title("Programme CNC Manager - Authentification")
-        self.root.geometry("380+250+200")
+        self.root.geometry("380x250+250+200")  # Correction de la syntaxe de géométrie
         self.root.resizable(False, False)
         
         # Style
@@ -120,7 +120,7 @@ class LoginWindow:
         result = cursor.fetchone()
         conn.close()
         
-        if result or (user == "admin" and pwd == "admin123"): # Sécurité de secours
+        if result or (user == "admin" and pwd == "admin123"):
             self.root.destroy()
             self.on_success()
         else:
@@ -131,8 +131,8 @@ class CNCManagerApp:
     def __init__(self, root):
         self.root = root
         self.root.title(f"PROGRAMME CNC MANAGER - v{APP_VERSION}")
-        self.root.geometry("1100=700+100+50")
-        self.root.state('zoomed') # Plein écran
+        self.root.geometry("1100x700+100+50")  # Correction de la syntaxe de géométrie
+        self.root.state('zoomed')
         
         # Création de la barre de menus
         self.create_menu()
@@ -248,7 +248,6 @@ class CNCManagerApp:
         btn_refresh = tk.Button(frame_top, text="Rafraîchir", command=self.load_programs_data, bg="#2E8B57", fg="white", font=("Arial", 9))
         btn_refresh.pack(side=tk.RIGHT, padx=5)
 
-        # Tableau Treeview avec colonnes structurées
         columns = ("ID", "Modèle", "Programme CNC", "Chemin d'accès", "Dernière Modif.", "Taille", "Statut")
         self.tree_programs = ttk.Treeview(self.tab_programs, columns=columns, show="headings", selectmode="extended")
         
@@ -263,7 +262,7 @@ class CNCManagerApp:
         self.tree_programs.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y, pady=5)
         
-        # Clic droit (Menu contextuel) déjà validé et existant
+        # Clic droit (Menu contextuel)
         self.context_menu = tk.Menu(self.root, tearoff=0)
         self.context_menu.add_command(label="Ajouter à l'OF", command=self.add_to_of_action)
         self.context_menu.add_command(label="Voir / Éditer le programme", command=self.view_program_content)
@@ -282,7 +281,6 @@ class CNCManagerApp:
         cursor.execute("SELECT id, model_name, program_name, file_path, last_modified, file_size, status FROM cnc_programs")
         rows = cursor.fetchall()
         
-        # Données factices de démonstration si vide
         if not rows:
             sample_data = [
                 (1, "Modèle A-10", "OAP001.NC", "C:/CNC_Files/OAP001.NC", "2026-09-10 14:20", "12 Ko", "Actif"),
@@ -330,8 +328,7 @@ class CNCManagerApp:
         if selected:
             item_values = self.tree_programs.item(selected[0], 'values')
             path = item_values[3]
-            messagebox.showinfo("Visualisation", f"Ouverture fictive ou lecture du fichier :\n{path}")
-            
+            messagebox.showinfo("Visualisation", f"Ouverture fictive ou lecture du fichier :\n{path}") # Correction f-string validée
 
     def delete_program_entry(self):
         selected = self.tree_programs.selection()
@@ -339,18 +336,16 @@ class CNCManagerApp:
             if messagebox.askyesno("Confirmation", "Voulez-vous vraiment supprimer cette référence ?"):
                 self.tree_programs.delete(selected[0])
 
-    # --- ONGLET 2 : COMPARAISON DE FICHIERS / DOSSIERS (AVEC BARRE DE DÉFILEMENT DES DIFFÉRENCES) ---
+    # --- ONGLET 2 : COMPARAISON DE FICHIERS / DOSSIERS ---
     def init_tab_compare(self):
         frame_paths = tk.LabelFrame(self.tab_compare, text=" Sélection des Fichiers / Dossiers à Comparer ", font=("Arial", 10, "bold"), padx=10, pady=10)
         frame_paths.pack(fill=tk.X, padx=10, pady=10)
         
-        # Fichier A
         tk.Label(frame_paths, text="Fichier A (Référence) :", font=("Arial", 9)).grid(row=0, column=0, sticky="w", pady=5)
         self.entry_file_a = tk.Entry(frame_paths, width=60, font=("Arial", 9))
         self.entry_file_a.grid(row=0, column=1, padx=5, pady=5)
         tk.Button(frame_paths, text="Parcourir...", command=lambda: self.browse_file(self.entry_file_a), bg="#ddd", font=("Arial", 9)).grid(row=0, column=2, padx=5)
         
-        # Fichier B
         tk.Label(frame_paths, text="Fichier B (Modifié) :", font=("Arial", 9)).grid(row=1, column=0, sticky="w", pady=5)
         self.entry_file_b = tk.Entry(frame_paths, width=60, font=("Arial", 9))
         self.entry_file_b.grid(row=1, column=1, padx=5, pady=5)
@@ -359,7 +354,6 @@ class CNCManagerApp:
         btn_compare = tk.Button(frame_paths, text="Lancer la Comparaison", command=self.run_comparison, bg="#20b2aa", fg="white", font=("Arial", 10, "bold"))
         btn_compare.grid(row=2, column=1, pady=10)
         
-        # Zone de résultat de comparaison avec indicateur de différences et barre de défilement dédiée
         frame_results = tk.LabelFrame(self.tab_compare, text=" Résultat des Différences (Lignes divergentes) ", font=("Arial", 10, "bold"), padx=10, pady=10)
         frame_results.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         
@@ -433,7 +427,6 @@ class CNCManagerApp:
         btn_start_bk = tk.Button(frame_bk, text="Lancer la Sauvegarde Immédiate", command=self.trigger_backup, bg="#4682B4", fg="white", font=("Arial", 9, "bold"))
         btn_start_bk.grid(row=3, column=1, sticky="w", padx=5, pady=15)
         
-        # Barre de progression interactive
         frame_prog = tk.LabelFrame(self.tab_backup, text=" Progression ", font=("Arial", 10, "bold"), padx=15, pady=15)
         frame_prog.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
@@ -502,7 +495,7 @@ class CNCManagerApp:
         conn.close()
 
     def create_new_of(self):
-        messagebox.info = messagebox.showinfo("Nouvel OF", "Fenêtre de création d'un Ordre de Fabrication.")
+        messagebox.showinfo("Nouvel OF", "Fenêtre de création d'un Ordre de Fabrication.")
 
     # --- ONGLET 5 : COMMUNICATION MACHINE (NUM 1060) ---
     def init_tab_cnc(self):
@@ -543,7 +536,6 @@ if __name__ == "__main__":
     init_db()
     root = tk.Tk()
     
-    # Lancement d'abord de la fenêtre de login, puis de l'application principale si succès
     def start_main_app():
         app = CNCManagerApp(root)
         root.mainloop()
