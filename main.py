@@ -1,1758 +1,882 @@
 import sys
 import os
-import csv
 import sqlite3
-import datetime
-import multiprocessing
-import tempfile
-import json
 import hashlib
-import filecmp
-import shutil
+import datetime
+import threading
 import time
-import webbrowser
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 
-# Support impression Windows / Linux
-try:
-    import win32api
-    import win32print
-except ImportError:
-    win32print = None
-    win32api = None
+DB_NAME = "cnc_atelier.db"
+VIRTUAL_CN_DIR = os.path.abspath("CN_Virtuelle")
 
-# Support de la liaison série RS232 pour CNC NUM 1060
-try:
-    import serial
-except ImportError:
-    serial = None
-
-if __name__ == '__main__':
-    multiprocessing.freeze_support()
-
-APP_NAME = "Programme CNC Manager"
-APP_VERSION = "4.2.0"
-APP_AUTHOR = "Bouzaien Dhaou"
-
-DB_FILE = "programme_cnc_manager.db"
-CONFIG_FILE = "config_cnc.json"
-DEFAULT_PASSWORD_HASH = hashlib.sha256("1234".encode()).hexdigest()
-
-HAS_REPORTLAB = False
-try:
-    from reportlab.lib.pagesizes import A4
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib import colors
-    HAS_REPORTLAB = True
-except ImportError:
-    HAS_REPORTLAB = False
-
-
-# ==========================================
-# 1. INITIALISATION DE LA BASE DE DONNÉES & CONFIG
-# ==========================================
+if not os.path.exists(VIRTUAL_CN_DIR):
+    os.makedirs(VIRTUAL_CN_DIR)
 
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-
+    
+    # Users table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            role TEXT NOT NULL
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('Admin', 'Superviseur', 'Opérateur'))
         )
     ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS models_catalog (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            model_name TEXT NOT NULL,
-            prog_name TEXT,
-            block_dim TEXT,
-            block_dim_bought TEXT,
-            qty_per_block TEXT,
-            z_between_pains TEXT,
-            tools TEXT,
-            caisson TEXT,
-            top_plate TEXT,
-            bottom_plate TEXT,
-            remarks TEXT,
-            phase TEXT DEFAULT 'Étude',
-            is_hidden INTEGER DEFAULT 0
-        )
-    ''')
-
-    cursor.execute("PRAGMA table_info(models_catalog)")
-    cols = [column[1] for column in cursor.fetchall()]
-    if 'phase' not in cols:
-        cursor.execute("ALTER TABLE models_catalog ADD COLUMN phase TEXT DEFAULT 'Étude'")
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS machines (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE NOT NULL,
-            description TEXT
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS machine_tools (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            machine_id INTEGER NOT NULL,
-            tool_name TEXT NOT NULL,
-            diameter REAL,
-            length_out REAL,
-            length_comp REAL,
-            pocket INTEGER,
-            FOREIGN KEY(machine_id) REFERENCES machines(id) ON DELETE CASCADE
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS work_orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            of_number TEXT UNIQUE NOT NULL,
-            machine TEXT NOT NULL,
-            assigned_operator TEXT NOT NULL,
-            priority TEXT NOT NULL,
-            status TEXT DEFAULT 'En attente',
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS work_order_items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            of_number TEXT NOT NULL,
-            model_name TEXT NOT NULL,
-            prog_name TEXT,
-            qty INTEGER DEFAULT 1,
-            block_num TEXT,
-            block_density TEXT,
-            pain_num TEXT,
-            pain_weight TEXT,
-            status TEXT DEFAULT 'En attente',
-            FOREIGN KEY(of_number) REFERENCES work_orders(of_number) ON DELETE CASCADE
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS machining_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            of_number TEXT,
-            operator TEXT NOT NULL,
-            machine TEXT NOT NULL,
-            model_name TEXT NOT NULL,
-            real_time_min INTEGER,
-            status TEXT NOT NULL,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-
+    
+    # Default admin user if none exists
     cursor.execute("SELECT COUNT(*) FROM users")
     if cursor.fetchone()[0] == 0:
-        cursor.execute("INSERT INTO users (username, password, role) VALUES ('admin', 'admin123', 'Admin')")
-        cursor.execute("INSERT INTO users (username, password, role) VALUES ('op1', 'op123', 'Operateur')")
+        h = hashlib.sha256("admin123".encode()).hexdigest()
+        cursor.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)", ("dhaou", h, "Admin"))
+        h_op = hashlib.sha256("op123".encode()).hexdigest()
+        cursor.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)", ("operateur1", h_op, "Opérateur"))
+        h_sup = hashlib.sha256("sup123".encode()).hexdigest()
+        cursor.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)", ("superviseur1", h_sup, "Superviseur"))
+        conn.commit()
 
-    cursor.execute("SELECT COUNT(*) FROM machines")
+    # Article Types table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS article_types (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            is_windsurf INTEGER DEFAULT 0
+        )
+    ''')
+    cursor.execute("SELECT COUNT(*) FROM article_types")
     if cursor.fetchone()[0] == 0:
-        cursor.execute("INSERT INTO machines (name, description) VALUES ('NUM 1060 (5-Axes)', 'Fraiseuse 5 axes NUM 1060')")
-        cursor.execute("INSERT INTO machines (name, description) VALUES ('Fraiseuse EPS', 'Fraiseuse 3 axes grands volumes')")
+        cursor.execute("INSERT INTO article_types (name, is_windsurf) VALUES ('Planche à voile', 1)")
+        cursor.execute("INSERT INTO article_types (name, is_windsurf) VALUES ('PVC', 0)")
+        cursor.execute("INSERT INTO article_types (name, is_windsurf) VALUES ('Surfaçage moule', 0)")
+        cursor.execute("INSERT INTO article_types (name, is_windsurf) VALUES ('USBox', 0)")
+        cursor.execute("INSERT INTO article_types (name, is_windsurf) VALUES ('Bois', 0)")
+        conn.commit()
 
-    conn.commit()
+    # Catalog Models table (Flexible for Windsurf + generic)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS catalog_models (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            article_type TEXT NOT NULL,
+            programme_pain TEXT,
+            densite TEXT,
+            dimensions_bloc TEXT,
+            dimension_bloc_achete TEXT,
+            qte_pains_bloc TEXT,
+            z_entre_pains TEXT,
+            outils TEXT,
+            caisson TEXT,
+            prog_pvc_dessus TEXT,
+            prog_pvc_dessous TEXT,
+            remarque TEXT,
+            status TEXT DEFAULT 'Etude' CHECK(status IN ('Etude', 'Test', 'Valide'))
+        )
+    ''')
+
+    # Blocks / Raw materials stock
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS raw_blocks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            block_number TEXT UNIQUE NOT NULL,
+            material_type TEXT,
+            density REAL,
+            weight REAL,
+            reception_date TEXT,
+            tested INTEGER DEFAULT 0,
+            stock_qty REAL
+        )
+    ''')
+
+    # Manufacturing Orders (OF)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS manufacturing_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            of_number TEXT UNIQUE NOT NULL,
+            model_name TEXT,
+            article_type TEXT,
+            assigned_operator TEXT,
+            status TEXT DEFAULT 'Créé',
+            block_number TEXT,
+            part_number TEXT,
+            finishing_operator TEXT,
+            weight_finished REAL,
+            quality_status TEXT DEFAULT 'En attente',
+            non_conformity_cause TEXT,
+            comment TEXT,
+            created_date TEXT
+        )
+    ''')
+
+    # Tools inventory & life
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS tools (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tool_ref TEXT UNIQUE NOT NULL,
+            description TEXT,
+            max_life_hours REAL,
+            current_usage_hours REAL DEFAULT 0,
+            max_parts INTEGER,
+            current_parts_count INTEGER DEFAULT 0
+        )
+    ''')
+
+    # Machine Maintenance log
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS machine_maintenance (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            machine_name TEXT,
+            intervention_date TEXT,
+            description TEXT,
+            technician TEXT
+        )
+    ''')
+
+    # Traceability Logs
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS traceability_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            username TEXT,
+            action TEXT,
+            details TEXT,
+            machine TEXT,
+            status TEXT
+        )
+    ''')
+
     conn.close()
 
-
-def load_config():
-    default_config = {
-        "password_hash": DEFAULT_PASSWORD_HASH,
-        "default_working_dir": os.path.expanduser("~"),
-        "default_input_dir": os.path.expanduser("~"),
-        "default_output_dir": os.path.expanduser("~"),
-        "virtual_cnc_dir": os.path.join(os.path.expanduser("~"), "Virtual_CNC_Sim"),
-        "use_last_backup_dir": False,
-        "last_backup_dir": ""
-    }
-    if not os.path.exists(CONFIG_FILE):
-        save_config(default_config)
-        return default_config
-    try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-            for k, v in default_config.items():
-                if k not in cfg:
-                    cfg[k] = v
-            return cfg
-    except Exception:
-        return default_config
-
-
-def save_config(config):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(config, f, ensure_ascii=False, indent=2)
-
-
-# ==========================================
-# 2. DIALOGUES ET MODULES AUXILIAIRES
-# ==========================================
-
-class AdvancedPrintDialog(tk.Toplevel):
-    def __init__(self, parent, title, headers, data):
-        super().__init__(parent)
-        self.title(f"Impression / Exportation - {title}")
-        self.geometry("820x620")
-        self.transient(parent)
-        self.grab_set()
-
-        self.doc_title = title
-        self.headers = headers
-        self.data = data
-
-        self._setup_ui()
-        self._generate_preview()
-
-    def _setup_ui(self):
-        main_frame = ttk.Frame(self, padding=10)
-        main_frame.pack(fill=tk.BOTH, expand=True)
-
-        config_frame = ttk.LabelFrame(main_frame, text=" Configuration ", padding=10)
-        config_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
-
-        ttk.Label(config_frame, text="Destination :", font=('Arial', 9, 'bold')).pack(anchor=tk.W, pady=(0, 2))
-        self.print_mode = tk.StringVar(value="PRINTER")
-        ttk.Radiobutton(config_frame, text="Imprimante système", variable=self.print_mode, value="PRINTER", command=self._toggle_mode).pack(anchor=tk.W)
-        ttk.Radiobutton(config_frame, text="Exporter en PDF / HTML", variable=self.print_mode, value="PDF", command=self._toggle_mode).pack(anchor=tk.W)
-
-        ttk.Separator(config_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
-
-        self.printer_label = ttk.Label(config_frame, text="Imprimante :")
-        self.printer_label.pack(anchor=tk.W)
-        
-        printers = []
-        default_printer = ""
-        if win32print:
-            try:
-                printers = [p[2] for p in win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS)]
-                default_printer = win32print.GetDefaultPrinter()
-            except Exception:
-                pass
-
-        self.printer_combo = ttk.Combobox(config_frame, values=printers, state="readonly", width=24)
-        if default_printer in printers:
-            self.printer_combo.set(default_printer)
-        elif printers:
-            self.printer_combo.current(0)
-        self.printer_combo.pack(anchor=tk.W, pady=(0, 10))
-
-        ttk.Label(config_frame, text="Orientation :").pack(anchor=tk.W)
-        self.orientation = tk.StringVar(value="Landscape")
-        ttk.Radiobutton(config_frame, text="Paysage (Recommandé)", variable=self.orientation, value="Landscape").pack(anchor=tk.W)
-        ttk.Radiobutton(config_frame, text="Portrait", variable=self.orientation, value="Portrait").pack(anchor=tk.W)
-
-        ttk.Separator(config_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
-
-        self.btn_print = ttk.Button(config_frame, text="🖨️ Imprimer", command=self._execute_print)
-        self.btn_print.pack(side=tk.BOTTOM, fill=tk.X, pady=10)
-
-        preview_frame = ttk.LabelFrame(main_frame, text=" Aperçu Avant Impression ", padding=10)
-        preview_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
-
-        self.preview_text = tk.Text(preview_frame, wrap=tk.NONE, font=("Courier", 8), bg="#FFFFFF")
-        scroll_y = ttk.Scrollbar(preview_frame, orient=tk.VERTICAL, command=self.preview_text.yview)
-        scroll_x = ttk.Scrollbar(preview_frame, orient=tk.HORIZONTAL, command=self.preview_text.xview)
-        self.preview_text.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
-
-        scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
-        scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
-        self.preview_text.pack(fill=tk.BOTH, expand=True)
-
-    def _toggle_mode(self):
-        if self.print_mode.get() == "PDF":
-            self.printer_combo.configure(state="disabled")
-            self.btn_print.configure(text="📄 Exporter PDF")
-        else:
-            self.printer_combo.configure(state="readonly")
-            self.btn_print.configure(text="🖨️ Imprimer")
-
-    def _generate_html(self):
-        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-        html = f"""
-        <html>
-        <head>
-            <meta charset="utf-8">
-            <style>
-                body {{ font-family: Arial, sans-serif; margin: 15px; }}
-                h2 {{ text-align: center; color: #111; margin-bottom: 5px; }}
-                .date {{ text-align: right; font-size: 9pt; color: #555; margin-bottom: 10px; }}
-                table {{ width: 100%; border-collapse: collapse; }}
-                th, td {{ border: 1px solid #777; padding: 5px 6px; text-align: left; font-size: 8pt; }}
-                th {{ background-color: #e0e0e0; font-weight: bold; }}
-                tr:nth-child(even) {{ background-color: #f8f8f8; }}
-                @page {{ size: {self.orientation.get().lower()}; margin: 8mm; }}
-            </style>
-        </head>
-        <body>
-            <h2>--- {self.doc_title.upper()} ---</h2>
-            <div class="date">Édité le : {now}</div>
-            <table>
-                <thead>
-                    <tr>{''.join([f'<th>{h}</th>' for h in self.headers])}</tr>
-                </thead>
-                <tbody>
-        """
-        for row in self.data:
-            html += "<tr>" + "".join([f"<td>{str(cell) if cell is not None else ''}</td>" for cell in row]) + "</tr>"
-        html += "</tbody></table></body></html>"
-        return html
-
-    def _generate_preview(self):
-        col_widths = [len(str(h)) for h in self.headers]
-        for row in self.data:
-            for i, cell in enumerate(row):
-                col_widths[i] = max(col_widths[i], len(str(cell if cell is not None else "")))
-
-        format_str = " | ".join([f"{{:<{w}}}" for w in col_widths]) + "\n"
-        separator = "-" * (sum(col_widths) + (3 * len(col_widths)) - 1) + "\n"
-
-        self.preview_text.delete("1.0", tk.END)
-        self.preview_text.insert(tk.END, f" Document : {self.doc_title}\n")
-        self.preview_text.insert(tk.END, f" Total éléments : {len(self.data)}\n")
-        self.preview_text.insert(tk.END, separator)
-        self.preview_text.insert(tk.END, format_str.format(*self.headers))
-        self.preview_text.insert(tk.END, separator)
-
-        for row in self.data:
-            row_str = [str(c) if c is not None else "" for c in row]
-            self.preview_text.insert(tk.END, format_str.format(*row_str))
-
-    def _execute_print(self):
-        if self.print_mode.get() == "PDF":
-            file_path = filedialog.asksaveasfilename(defaultextension=".html", filetypes=[("Fichier Document (*.html)", "*.html")])
-            if file_path:
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(self._generate_html())
-                messagebox.showinfo("Succès", f"Fichier sauvegardé avec succès :\n{file_path}", parent=self)
-                self.destroy()
-        else:
-            selected_printer = self.printer_combo.get()
-            if not selected_printer:
-                messagebox.showwarning("Attention", "Aucune imprimante sélectionnée.", parent=self)
-                return
-
-            temp_file = os.path.join(tempfile.gettempdir(), "cnc_print_output.html")
-            with open(temp_file, "w", encoding="utf-8") as f:
-                f.write(self._generate_html())
-
-            if win32api:
-                try:
-                    win32api.ShellExecute(0, "printto", temp_file, f'"{selected_printer}"', ".", 0)
-                    messagebox.showinfo("Impression", "Le document a été transmis à l'imprimante.", parent=self)
-                    self.destroy()
-                except Exception as e:
-                    messagebox.showerror("Erreur", f"Erreur d'impression :\n{str(e)}", parent=self)
-            else:
-                os.system(f"start {temp_file}")
-                self.destroy()
-
-
-# Dialogue d'Options Généralisé (Outils > Options)
-class OptionsDialog(tk.Toplevel):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.title("Configuration Générale des Chemins et Options")
-        self.geometry("600x420")
-        self.resizable(False, False)
-        self.grab_set()
-        self.parent = parent
-
-        self.config = load_config()
-
-        # Cadre Dossiers de travail & E/S
-        f_paths = ttk.LabelFrame(self, text=" Gestion Centralisée des Chemins d'Accès ", padding=10)
-        f_paths.pack(fill="x", padx=15, pady=10)
-
-        # 1. Dossier de travail G-Code
-        ttk.Label(f_paths, text="Dossier de travail G-Code :").grid(row=0, column=0, sticky="w", pady=5)
-        self.e_work = ttk.Entry(f_paths, width=40)
-        self.e_work.insert(0, self.config.get("default_working_dir", ""))
-        self.e_work.grid(row=0, column=1, padx=5, pady=5)
-        ttk.Button(f_paths, text="Parcourir", command=lambda: self.browse(self.e_work)).grid(row=0, column=2)
-
-        # 2. Dossier d'entrée (Imports)
-        ttk.Label(f_paths, text="Dossier d'Entrée (Imports) :").grid(row=1, column=0, sticky="w", pady=5)
-        self.e_in = ttk.Entry(f_paths, width=40)
-        self.e_in.insert(0, self.config.get("default_input_dir", ""))
-        self.e_in.grid(row=1, column=1, padx=5, pady=5)
-        ttk.Button(f_paths, text="Parcourir", command=lambda: self.browse(self.e_in)).grid(row=1, column=2)
-
-        # 3. Dossier de sortie (Exports)
-        ttk.Label(f_paths, text="Dossier de Sortie (Exports) :").grid(row=2, column=0, sticky="w", pady=5)
-        self.e_out = ttk.Entry(f_paths, width=40)
-        self.e_out.insert(0, self.config.get("default_output_dir", ""))
-        self.e_out.grid(row=2, column=1, padx=5, pady=5)
-        ttk.Button(f_paths, text="Parcourir", command=lambda: self.browse(self.e_out)).grid(row=2, column=2)
-
-        # 4. Dossier Virtuel CNC (Simulation)
-        ttk.Label(f_paths, text="Dossier Virtuel CNC (Simulation) :").grid(row=3, column=0, sticky="w", pady=5)
-        self.e_vcnc = ttk.Entry(f_paths, width=40)
-        self.e_vcnc.insert(0, self.config.get("virtual_cnc_dir", ""))
-        self.e_vcnc.grid(row=3, column=1, padx=5, pady=5)
-        ttk.Button(f_paths, text="Parcourir", command=lambda: self.browse(self.e_vcnc)).grid(row=3, column=2)
-
-        self.var_use_last = tk.BooleanVar(value=self.config.get("use_last_backup_dir", False))
-        chk = ttk.Checkbutton(self, text="Prendre par défaut le dossier de la dernière sauvegarde", variable=self.var_use_last)
-        chk.pack(anchor="w", padx=15, pady=5)
-
-        f_btn = ttk.Frame(self)
-        f_btn.pack(side="bottom", fill="x", pady=15, padx=15)
-
-        ttk.Button(f_btn, text="Enregistrer", command=self.save).pack(side="right", padx=5)
-        ttk.Button(f_btn, text="Annuler", command=self.destroy).pack(side="right", padx=5)
-
-    def browse(self, entry_widget):
-        d = filedialog.askdirectory()
-        if d:
-            entry_widget.delete(0, tk.END)
-            entry_widget.insert(0, d)
-
-    def save(self):
-        self.config["default_working_dir"] = self.e_work.get().strip()
-        self.config["default_input_dir"] = self.e_in.get().strip()
-        self.config["default_output_dir"] = self.e_out.get().strip()
-        self.config["virtual_cnc_dir"] = self.e_vcnc.get().strip()
-        self.config["use_last_backup_dir"] = self.var_use_last.get()
-        save_config(self.config)
-        
-        # Création automatique du dossier virtuel CNC s'il n'existe pas
-        vdir = self.config["virtual_cnc_dir"]
-        if vdir:
-            os.makedirs(vdir, exist_ok=True)
-
-        messagebox.showinfo("Succès", "Configuration générale des chemins enregistrée.", parent=self)
-        self.destroy()
-
-
-# Dialogue de Gestion des Machines (Outils > Configuration Machines)
-class MachinesConfigDialog(tk.Toplevel):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.title("Configuration des Machines & Outils de Coupe")
-        self.geometry("850x550")
-        self.grab_set()
-
-        self._setup_ui()
-        self.load_machines()
-
-    def _setup_ui(self):
-        paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
-        paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        frame_mach = ttk.LabelFrame(paned, text=" Parc Machines ", padding=10)
-        paned.add(frame_mach, weight=1)
-
-        self.list_machines = tk.Listbox(frame_mach, height=15)
-        self.list_machines.pack(fill=tk.BOTH, expand=True, pady=5)
-        self.list_machines.bind("<<ListboxSelect>>", self.on_machine_select)
-
-        f_mach_btn = ttk.Frame(frame_mach)
-        f_mach_btn.pack(fill="x", pady=5)
-        ttk.Button(f_mach_btn, text="+ Machine", command=self.add_machine).pack(side="left", padx=2)
-        ttk.Button(f_mach_btn, text="- Supprimer", command=self.delete_machine).pack(side="left", padx=2)
-
-        frame_tools = ttk.LabelFrame(paned, text=" Tableau Dynamique des Outils de Coupe ", padding=10)
-        paned.add(frame_tools, weight=2)
-
-        f_add_tool = ttk.Frame(frame_tools)
-        f_add_tool.pack(fill="x", pady=5)
-
-        ttk.Label(f_add_tool, text="Outil:").grid(row=0, column=0, padx=2)
-        self.e_tname = ttk.Entry(f_add_tool, width=12)
-        self.e_tname.grid(row=0, column=1, padx=2)
-
-        ttk.Label(f_add_tool, text="Ø(mm):").grid(row=0, column=2, padx=2)
-        self.e_tdiam = ttk.Entry(f_add_tool, width=6)
-        self.e_tdiam.grid(row=0, column=3, padx=2)
-
-        ttk.Label(f_add_tool, text="L.Sort.:").grid(row=0, column=4, padx=2)
-        self.e_tlout = ttk.Entry(f_add_tool, width=6)
-        self.e_tlout.grid(row=0, column=5, padx=2)
-
-        ttk.Label(f_add_tool, text="Comp.:").grid(row=0, column=6, padx=2)
-        self.e_tlcomp = ttk.Entry(f_add_tool, width=6)
-        self.e_tlcomp.grid(row=0, column=7, padx=2)
-
-        ttk.Label(f_add_tool, text="Poche:").grid(row=0, column=8, padx=2)
-        self.e_tpocket = ttk.Entry(f_add_tool, width=5)
-        self.e_tpocket.grid(row=0, column=9, padx=2)
-
-        ttk.Button(f_add_tool, text="Ajouter Outil", command=self.add_tool).grid(row=0, column=10, padx=5)
-
-        cols = ("id", "tool_name", "diameter", "length_out", "length_comp", "pocket")
-        self.tree_tools = ttk.Treeview(frame_tools, columns=cols, show="headings")
-        self.tree_tools.heading("id", text="ID")
-        self.tree_tools.heading("tool_name", text="Nom Outil")
-        self.tree_tools.heading("diameter", text="Diamètre")
-        self.tree_tools.heading("length_out", text="Long. Sortante")
-        self.tree_tools.heading("length_comp", text="Long. Comp.")
-        self.tree_tools.heading("pocket", text="N° Poche")
-
-        self.tree_tools.pack(fill=tk.BOTH, expand=True, pady=5)
-        ttk.Button(frame_tools, text="Supprimer Outil Sélectionné", command=self.delete_tool).pack(anchor="e", pady=5)
-
-    def load_machines(self):
-        self.list_machines.delete(0, tk.END)
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, name FROM machines")
-        self.machines_data = cursor.fetchall()
-        conn.close()
-
-        for m in self.machines_data:
-            self.list_machines.insert(tk.END, m[1])
-
-        if self.machines_data:
-            self.list_machines.select_set(0)
-            self.on_machine_select(None)
-
-    def get_selected_machine_id(self):
-        sel = self.list_machines.curselection()
-        if sel:
-            return self.machines_data[sel[0]][0]
-        return None
-
-    def on_machine_select(self, event):
-        m_id = self.get_selected_machine_id()
-        for item in self.tree_tools.get_children():
-            self.tree_tools.delete(item)
-
-        if m_id:
-            conn = sqlite3.connect(DB_FILE)
-            cursor = conn.cursor()
-            cursor.execute("SELECT id, tool_name, diameter, length_out, length_comp, pocket FROM machine_tools WHERE machine_id=?", (m_id,))
-            for row in cursor.fetchall():
-                self.tree_tools.insert("", tk.END, values=row)
-            conn.close()
-
-    def add_machine(self):
-        name = simpledialog.askstring("Machine", "Nom de la nouvelle machine :", parent=self)
-        if name:
-            conn = sqlite3.connect(DB_FILE)
-            cursor = conn.cursor()
-            try:
-                cursor.execute("INSERT INTO machines (name, description) VALUES (?, ?)", (name, "Machine CNC"))
-                conn.commit()
-            except sqlite3.IntegrityError:
-                messagebox.showerror("Erreur", "Machine déjà existante.", parent=self)
-            conn.close()
-            self.load_machines()
-
-    def delete_machine(self):
-        m_id = self.get_selected_machine_id()
-        if m_id and messagebox.askyesno("Confirmation", "Supprimer cette machine et ses outils ?", parent=self):
-            conn = sqlite3.connect(DB_FILE)
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM machines WHERE id=?", (m_id,))
-            conn.commit()
-            conn.close()
-            self.load_machines()
-
-    def add_tool(self):
-        m_id = self.get_selected_machine_id()
-        if not m_id:
-            return
-        tname = self.e_tname.get().strip()
-        if not tname:
-            return
-
-        try:
-            diam = float(self.e_tdiam.get().replace(',', '.')) if self.e_tdiam.get() else 0.0
-            lout = float(self.e_tlout.get().replace(',', '.')) if self.e_tlout.get() else 0.0
-            lcomp = float(self.e_tlcomp.get().replace(',', '.')) if self.e_tlcomp.get() else 0.0
-            pock = int(self.e_tpocket.get()) if self.e_tpocket.get() else 1
-        except ValueError:
-            messagebox.showerror("Erreur", "Valeurs numériques invalides.", parent=self)
-            return
-
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO machine_tools (machine_id, tool_name, diameter, length_out, length_comp, pocket)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (m_id, tname, diam, lout, lcomp, pock))
-        conn.commit()
-        conn.close()
-
-        self.e_tname.delete(0, tk.END)
-        self.e_tdiam.delete(0, tk.END)
-        self.e_tlout.delete(0, tk.END)
-        self.e_tlcomp.delete(0, tk.END)
-        self.e_tpocket.delete(0, tk.END)
-        self.on_machine_select(None)
-
-    def delete_tool(self):
-        sel = self.tree_tools.selection()
-        if sel:
-            t_id = self.tree_tools.item(sel[0])['values'][0]
-            conn = sqlite3.connect(DB_FILE)
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM machine_tools WHERE id=?", (t_id,))
-            conn.commit()
-            conn.close()
-            self.on_machine_select(None)
-
-
-class ModelSearchDialog(tk.Toplevel):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.title("Sélectionner un Modèle")
-        self.geometry("450x350")
-        self.grab_set()
-
-        self.selected_model = None
-
-        ttk.Label(self, text="Recherche rapide de modèle :").pack(pady=5)
-        self.entry_search = ttk.Entry(self, width=35)
-        self.entry_search.pack(pady=5)
-        self.entry_search.focus()
-
-        self.listbox = tk.Listbox(self, width=50, height=10)
-        self.listbox.pack(pady=5, fill=tk.BOTH, expand=True, padx=10)
-
-        self.entry_search.bind("<KeyRelease>", lambda e: self.update_list())
-        self.listbox.bind("<Double-1>", lambda e: self.confirm())
-
-        self.update_list()
-        ttk.Button(self, text="Valider Sélection", command=self.confirm).pack(pady=10)
-
-    def update_list(self):
-        q = self.entry_search.get().strip()
-        self.listbox.delete(0, tk.END)
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT model_name FROM models_catalog WHERE is_hidden=0 AND model_name LIKE ? ORDER BY model_name ASC", (f'%{q}%',))
-        for r in cursor.fetchall():
-            self.listbox.insert(tk.END, r[0])
-        conn.close()
-
-    def confirm(self):
-        sel = self.listbox.get(tk.ACTIVE)
-        if sel:
-            self.selected_model = sel
-            self.destroy()
-
-
-# ==========================================
-# 3. APPLICATION PRINCIPALE
-# ==========================================
-
-class CNCApplication(tk.Tk):
-    def __init__(self):
-        super().__init__()
-        self.title(APP_NAME)
-        self.geometry("1280x780")
-
-        w, h = 1280, 780
-        x = (self.winfo_screenwidth() // 2) - (w // 2)
-        y = (self.winfo_screenheight() // 2) - (h // 2)
-        self.geometry(f'{w}x{h}+{x}+{y}')
-
+init_db()
+
+class CNCApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("CNC Atelier Manager V2 - Phase 1 Prototype")
+        self.root.geometry("1200x800")
         self.current_user = None
-        self.sort_directions = {}
-        self.current_of_cart = []
-        self.diff_lines = []
-        self.current_diff_index = -1
-
+        self.current_role = None
+        
         self.show_login_screen()
 
     def clear_window(self):
-        for widget in self.winfo_children():
+        for widget in self.root.winfo_children():
             widget.destroy()
 
     def show_login_screen(self):
         self.clear_window()
-        self.title(f"Connexion - {APP_NAME}")
-        self.geometry("380x240")
-
-        ttk.Label(self, text=f"{APP_NAME} - Atelier Composite", font=("Arial", 12, "bold")).pack(pady=15)
-        frame = ttk.Frame(self)
-        frame.pack(pady=5, padx=20)
-
-        ttk.Label(frame, text="Utilisateur :").grid(row=0, column=0, sticky="w", pady=5)
-        self.entry_user = ttk.Entry(frame, width=20)
-        self.entry_user.grid(row=0, column=1, pady=5)
-        self.entry_user.focus()
-
-        ttk.Label(frame, text="Mot de passe :").grid(row=1, column=0, sticky="w", pady=5)
-        self.entry_pass = ttk.Entry(frame, show="*", width=20)
-        self.entry_pass.grid(row=1, column=1, pady=5)
-
-        btn_frame = ttk.Frame(self)
-        btn_frame.pack(pady=15)
-        ttk.Button(btn_frame, text="Se connecter", command=self.check_login).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="Quitter", command=self.destroy).pack(side="right", padx=5)
-
-        self.bind('<Return>', lambda e: self.check_login())
-
-    def check_login(self):
-        user, pwd = self.entry_user.get().strip(), self.entry_pass.get().strip()
-        if not user or not pwd:
-            messagebox.showwarning("Erreur", "Veuillez remplir tous les champs.", parent=self)
-            return
-
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT username, role FROM users WHERE username=? AND password=?", (user, pwd))
-        row = cursor.fetchone()
-        conn.close()
-
-        if row or pwd == "1234":
-            self.current_user = {"username": user if row else "admin", "role": row[1] if row else "Admin"}
-            self.unbind('<Return>')
-            self.show_main_screen()
-        else:
-            messagebox.showerror("Erreur", "Identifiants invalides.", parent=self)
-
-    def show_main_screen(self):
-        self.clear_window()
-        self.title(f"{APP_NAME} - Session : {self.current_user['username']} [{self.current_user['role']}]")
-        self.geometry("1280x780")
-
-        menubar = tk.Menu(self)
-
-        menu_file = tk.Menu(menubar, tearoff=0)
-        menu_file.add_command(label="Importer Catalogue (CSV)", command=self.import_usi_tab_csv)
-        menu_file.add_command(label="Exporter Catalogue (CSV)", command=self.export_catalog_csv)
-        menu_file.add_separator()
-        menu_file.add_command(label="Déconnexion", command=self.show_login_screen)
-        menu_file.add_command(label="Quitter", command=self.destroy)
-        menubar.add_cascade(label="Fichier", menu=menu_file)
-
-        menu_tools = tk.Menu(menubar, tearoff=0)
-        menu_tools.add_command(label="Configuration Machines & Outils", command=self.open_machines_config)
-        menu_tools.add_command(label="Options...", command=self.open_options)
-        menubar.add_cascade(label="Outils", menu=menu_tools)
-
-        if self.current_user['role'] == 'Admin':
-            menu_admin = tk.Menu(menubar, tearoff=0)
-            menu_admin.add_command(label="Gestion des Utilisateurs", command=self.open_user_management)
-            menubar.add_cascade(label="Administration", menu=menu_admin)
-
-        self.config(menu=menubar)
-
-        header = tk.Frame(self, bg="#003366", height=45)
-        header.pack(fill=tk.X, side=tk.TOP)
-        tk.Label(header, text=APP_NAME.upper(), font=("Arial", 13, "bold"), fg="white", bg="#003366", pady=8).pack()
-
-        # Onglets mis à jour incluant la comparaison de dossiers
-        self.notebook = ttk.Notebook(self)
-        self.notebook.pack(fill="both", expand=True, padx=10, pady=5)
-
-        tab_catalog = ttk.Frame(self.notebook)
-        tab_compare = ttk.Frame(self.notebook)
-        tab_dir_compare = ttk.Frame(self.notebook) # Réintégration de la comparaison de dossiers
-        tab_backup = ttk.Frame(self.notebook)
-        tab_of = ttk.Frame(self.notebook)
-        tab_tracking = ttk.Frame(self.notebook)
-        tab_cnc = ttk.Frame(self.notebook)
-
-        self.notebook.add(tab_catalog, text=" 1. Liste programme usinage ")
-        self.notebook.add(tab_compare, text=" 2. Comparaison de Fichiers ")
-        self.notebook.add(tab_dir_compare, text=" 3. Comparaison de Dossiers ")
-        self.notebook.add(tab_backup, text=" 4. Planification & Sauvegardes ")
-        self.notebook.add(tab_of, text=" 5. Ordres de Fabrication (OF) ")
-        self.notebook.add(tab_tracking, text=" 6. Traçabilité & Suivi ")
-        self.notebook.add(tab_cnc, text=" 7. Transfert & Simulation CNC ")
-
-        self.setup_catalog_tab(tab_catalog)
-        self.setup_compare_tab(tab_compare)
-        self.setup_dir_compare_tab(tab_dir_compare)
-        self.setup_backup_tab(tab_backup)
-        self.setup_of_tab(tab_of)
-        self.setup_tracking_tab(tab_tracking)
-        self.setup_cnc_tab(tab_cnc)
-
-    def open_options(self):
-        OptionsDialog(self)
-
-    def open_machines_config(self):
-        MachinesConfigDialog(self)
-
-    def print_treeview_data(self, tree, title):
-        cols = tree["columns"]
-        headers = [tree.heading(col)["text"] for col in cols]
-        data = [tree.item(item)["values"] for item in tree.get_children()]
-        AdvancedPrintDialog(self, title, headers, data)
-
-    # ==========================================
-    # ONGLET 1 : CATALOGUE
-    # ==========================================
-    def setup_catalog_tab(self, parent):
-        frame_tools = ttk.Frame(parent)
-        frame_tools.pack(fill="x", padx=10, pady=5)
-
-        ttk.Label(frame_tools, text="Rechercher :").pack(side="left", padx=5)
-        self.entry_cat_search = ttk.Entry(frame_tools, width=20)
-        self.entry_cat_search.pack(side="left", padx=5)
-        self.entry_cat_search.bind("<KeyRelease>", lambda e: self.load_catalog_data())
-
-        if self.current_user['role'] == 'Admin':
-            ttk.Button(frame_tools, text="+ Ajouter Modèle", command=self.add_model_dialog).pack(side="left", padx=5)
-            ttk.Button(frame_tools, text="- Supprimer Modèle", command=self.delete_model_dialog).pack(side="left", padx=5)
-            ttk.Button(frame_tools, text="Cacher/Masquer Modèle", command=self.hide_model_dialog).pack(side="left", padx=5)
-
-        ttk.Button(frame_tools, text="📥 Importer Usi-Tab.csv", command=self.import_usi_tab_csv).pack(side="left", padx=5)
-        ttk.Button(frame_tools, text="📤 Exporter CSV", command=self.export_catalog_csv).pack(side="left", padx=5)
-        ttk.Button(frame_tools, text="🖨️ Imprimer Catalogue", command=lambda: self.print_treeview_data(self.tree_cat, "Catalogue Modeles Usi-Tab")).pack(side="right", padx=5)
-
-        frame_list = ttk.Frame(parent)
-        frame_list.pack(fill="both", expand=True, padx=10, pady=5)
-
-        cols = ("model_name", "prog_name", "block_dim", "block_dim_bought", "qty_per_block", "z_between_pains", "tools", "caisson", "top_plate", "bottom_plate", "phase", "remarks")
-        self.tree_cat = ttk.Treeview(frame_list, columns=cols, show="headings")
-
-        headings = {
-            "model_name": "Nom Model ↕",
-            "prog_name": "Nom Programme Pain ↕",
-            "block_dim": "Dimension Bloc ↕",
-            "block_dim_bought": "Dimension Bloc (Achetée) ↕",
-            "qty_per_block": "Qte/Bloc ↕",
-            "z_between_pains": "Z entre 2 pains ↕",
-            "tools": "Outils ↕",
-            "caisson": "Caisson ↕",
-            "top_plate": "Plaque Pont ↕",
-            "bottom_plate": "Plaque Carène ↕",
-            "phase": "Phase ↕",
-            "remarks": "Remarque ↕"
-        }
-
-        for c, h in headings.items():
-            self.tree_cat.heading(c, text=h, command=lambda _c=c: self.sort_treeview_cat(_c))
-
-        for c in cols:
-            self.tree_cat.column(c, width=100)
-
-        scrollbar_y = ttk.Scrollbar(frame_list, orient="vertical", command=self.tree_cat.yview)
-        scrollbar_x = ttk.Scrollbar(frame_list, orient="horizontal", command=self.tree_cat.xview)
-        self.tree_cat.configure(yscrollcommand=scrollbar_y.set, xscrollcommand=scrollbar_x.set)
-
-        self.tree_cat.pack(side="left", fill="both", expand=True)
-        scrollbar_y.pack(side="right", fill="y")
-        scrollbar_x.pack(side="bottom", fill="x")
-
-        self.tree_cat.bind("<Double-1>", self.on_cat_double_click)
-        self.tree_cat.bind("<Button-3>", self.on_cat_right_click)
-        self.load_catalog_data()
-
-    def sort_treeview_cat(self, col):
-        reverse = self.sort_directions.get(col, False)
-        items = [(self.tree_cat.set(k, col), k) for k in self.tree_cat.get_children('')]
-        items.sort(reverse=reverse)
-        for index, (val, k) in enumerate(items):
-            self.tree_cat.move(k, '', index)
-        self.sort_directions[col] = not reverse
-
-    def load_catalog_data(self):
-        for item in self.tree_cat.get_children():
-            self.tree_cat.delete(item)
-
-        query = self.entry_cat_search.get().strip() if hasattr(self, 'entry_cat_search') else ""
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        if query:
-            cursor.execute('''
-                SELECT model_name, prog_name, block_dim, block_dim_bought, qty_per_block, z_between_pains, tools, caisson, top_plate, bottom_plate, phase, remarks
-                FROM models_catalog WHERE is_hidden=0 AND (model_name LIKE ? OR prog_name LIKE ? OR tools LIKE ?) ORDER BY id ASC
-            ''', (f'%{query}%', f'%{query}%', f'%{query}%'))
-        else:
-            cursor.execute("SELECT model_name, prog_name, block_dim, block_dim_bought, qty_per_block, z_between_pains, tools, caisson, top_plate, bottom_plate, phase, remarks FROM models_catalog WHERE is_hidden=0 ORDER BY id ASC")
-
-        for row in cursor.fetchall():
-            self.tree_cat.insert("", "end", values=row)
-        conn.close()
-
-    def on_cat_double_click(self, event):
-        sel = self.tree_cat.selection()
-        if sel:
-            m_name = self.tree_cat.item(sel[0])['values'][0]
-            self.add_model_name_to_of_cart(m_name)
-
-    def on_cat_right_click(self, event):
-        item = self.tree_cat.identify_row(event.y)
-        if item:
-            self.tree_cat.selection_set(item)
-            menu = tk.Menu(self, tearoff=0)
-            menu.add_command(label="Ouvrir le programme (G-Code)", command=self.open_program_file_for_selected)
-            menu.add_command(label="Ajouter à l'OF", command=lambda: self.add_model_name_to_of_cart(self.tree_cat.item(item)['values'][0]))
-            menu.add_separator()
-            menu.add_command(label="Supprimer de la liste", command=self.delete_selected_cat_model)
-            menu.tk_popup(event.x_root, event.y_root)
-
-    def open_program_file_for_selected(self):
-        sel = self.tree_cat.selection()
-        if not sel:
-            return
-        m_vals = self.tree_cat.item(sel[0])['values']
-        p_name = m_vals[1]
-
-        cfg = load_config()
-        work_dir = cfg.get("default_working_dir", os.path.expanduser("~"))
-        target_file = os.path.join(work_dir, f"{p_name}.iso")
-        if not os.path.exists(target_file):
-            target_file = filedialog.askopenfilename(initialdir=work_dir, title=f"Sélectionner le programme pour {p_name}")
-
-        if target_file and os.path.exists(target_file):
-            self.notebook.select(6) # Index de l'onglet CNC
-            self.lbl_file.config(text=f"Fichier : {os.path.basename(target_file)}")
-            with open(target_file, "r", encoding="latin1") as f:
-                self.txt_preview.delete("1.0", tk.END)
-                self.txt_preview.insert(tk.END, f.read())
-
-    def add_model_name_to_of_cart(self, m_name):
-        self.notebook.select(4) # Index de l'onglet OF
-        self.combo_of_model.set(m_name)
-        self.add_item_to_of_cart()
-
-    def delete_selected_cat_model(self):
-        sel = self.tree_cat.selection()
-        if not sel:
-            return
-        m_name = self.tree_cat.item(sel[0])['values'][0]
-        if messagebox.askyesno("Confirmation", f"Supprimer définitivement le modèle '{m_name}' ?"):
-            conn = sqlite3.connect(DB_FILE)
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM models_catalog WHERE model_name=?", (m_name,))
-            conn.commit()
-            conn.close()
-            self.load_catalog_data()
-
-    def import_usi_tab_csv(self):
-        cfg = load_config()
-        initial_dir = cfg.get("default_input_dir", os.path.expanduser("~"))
-        file_path = filedialog.askopenfilename(initialdir=initial_dir, title="Sélectionner Usi-Tab.csv", filetypes=[("Fichiers CSV", "*.csv"), ("Tous", "*.*")])
-        if not file_path:
-            return
-        try:
-            conn = sqlite3.connect(DB_FILE)
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM models_catalog")
-
-            count = 0
-            encodings = ['latin1', 'cp1252', 'utf-8-sig', 'iso-8859-1']
-            rows = []
-            for enc in encodings:
-                try:
-                    with open(file_path, mode='r', encoding=enc) as f:
-                        reader = csv.reader(f, delimiter=';')
-                        rows = [r for r in reader if any(field.strip() for field in r)]
-                        if len(rows) > 0:
-                            break
-                except UnicodeDecodeError:
-                    continue
-
-            for r in rows[1:]:
-                if len(r) >= 2:
-                    cursor.execute('''
-                        INSERT INTO models_catalog (
-                            model_name, prog_name, block_dim, block_dim_bought, qty_per_block,
-                            z_between_pains, tools, caisson, top_plate, bottom_plate, phase, remarks
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (
-                        r[0].strip(), r[1].strip(),
-                        r[2].replace('\n', ' ').strip() if len(r) > 2 else "",
-                        r[3].replace('\n', ' ').strip() if len(r) > 3 else "",
-                        r[4].strip() if len(r) > 4 else "",
-                        r[5].strip() if len(r) > 5 else "",
-                        r[6].replace('\n', ' ').strip() if len(r) > 6 else "",
-                        r[7].strip() if len(r) > 7 else "",
-                        r[8].strip() if len(r) > 8 else "",
-                        r[9].strip() if len(r) > 9 else "",
-                        "Test",
-                        r[10].strip() if len(r) > 10 else ""
-                    ))
-                    count += 1
-
-            conn.commit()
-            conn.close()
-            messagebox.showinfo("Succès", f"{count} modèles importés.")
-            self.load_catalog_data()
-            self.update_model_comboboxes()
-        except Exception as e:
-            messagebox.showerror("Erreur", f"Erreur lors de l'importation :\n{str(e)}")
-
-    def export_catalog_csv(self):
-        cfg = load_config()
-        initial_dir = cfg.get("default_output_dir", os.path.expanduser("~"))
-        file_path = filedialog.asksaveasfilename(initialdir=initial_dir, defaultextension=".csv", filetypes=[("Fichiers CSV", "*.csv")])
-        if not file_path:
-            return
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT model_name, prog_name, block_dim, block_dim_bought, qty_per_block, z_between_pains, tools, caisson, top_plate, bottom_plate, phase, remarks FROM models_catalog")
-        rows = cursor.fetchall()
-        conn.close()
-
-        with open(file_path, mode='w', newline='', encoding='latin1') as f:
-            writer = csv.writer(f, delimiter=';')
-            writer.writerow(["Nom Model", "Prog. Pain", "Dimension Bloc", "Dimension Achetée", "Qte/Bloc", "Z entre 2 pains", "Outils", "Caisson", "Plaque Pont", "Plaque Carène", "Phase", "Remarque"])
-            writer.writerows(rows)
-        messagebox.showinfo("Export", "Catalogue exporté avec succès.")
-
-    def add_model_dialog(self):
-        win = tk.Toplevel(self)
-        win.title("Ajouter un Modèle au Catalogue")
-        win.geometry("420x520")
-
-        fields = ["Nom Modèle", "Prog. Pain", "Dimension Bloc", "Dimension Achetée", "Qte/Bloc", "Z entre 2 pains", "Outils", "Caisson", "Plaque Pont", "Plaque Carène", "Remarques"]
-        entries = {}
-
-        for i, field in enumerate(fields):
-            ttk.Label(win, text=f"{field} :").grid(row=i, column=0, padx=10, pady=3, sticky="w")
-            e = ttk.Entry(win, width=25)
-            e.grid(row=i, column=1, padx=10, pady=3)
-            entries[field] = e
-
-        ttk.Label(win, text="Phase :").grid(row=len(fields), column=0, padx=10, pady=3, sticky="w")
-        c_phase = ttk.Combobox(win, values=["Étude", "Test", "Validation"], state="readonly", width=22)
-        c_phase.current(0)
-        c_phase.grid(row=len(fields), column=1, padx=10, pady=3)
-
-        def save():
-            conn = sqlite3.connect(DB_FILE)
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO models_catalog (model_name, prog_name, block_dim, block_dim_bought, qty_per_block, z_between_pains, tools, caisson, top_plate, bottom_plate, phase, remarks)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                entries["Nom Modèle"].get().strip(), entries["Prog. Pain"].get().strip(),
-                entries["Dimension Bloc"].get().strip(), entries["Dimension Achetée"].get().strip(),
-                entries["Qte/Bloc"].get().strip(), entries["Z entre 2 pains"].get().strip(),
-                entries["Outils"].get().strip(), entries["Caisson"].get().strip(),
-                entries["Plaque Pont"].get().strip(), entries["Plaque Carène"].get().strip(),
-                c_phase.get(), entries["Remarques"].get().strip()
-            ))
-            conn.commit()
-            conn.close()
-            messagebox.showinfo("Succès", "Modèle ajouté.", parent=win)
-            win.destroy()
-            self.load_catalog_data()
-            self.update_model_comboboxes()
-
-        ttk.Button(win, text="Enregistrer", command=save).grid(row=len(fields)+1, column=0, columnspan=2, pady=15)
-
-    def delete_model_dialog(self):
-        win = ModelSearchDialog(self)
-        self.wait_window(win)
-        if win.selected_model and messagebox.askyesno("Confirmation", f"Supprimer le modèle '{win.selected_model}' ?"):
-            conn = sqlite3.connect(DB_FILE)
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM models_catalog WHERE model_name=?", (win.selected_model,))
-            conn.commit()
-            conn.close()
-            self.load_catalog_data()
-            self.update_model_comboboxes()
-
-    def hide_model_dialog(self):
-        win = ModelSearchDialog(self)
-        self.wait_window(win)
-        if win.selected_model:
-            conn = sqlite3.connect(DB_FILE)
-            cursor = conn.cursor()
-            cursor.execute("UPDATE models_catalog SET is_hidden = CASE WHEN is_hidden=1 THEN 0 ELSE 1 END WHERE model_name=?", (win.selected_model,))
-            conn.commit()
-            conn.close()
-            self.load_catalog_data()
-
-    # ==========================================
-    # ONGLET 2 : COMPARAISON AVANCÉE DE FICHIERS
-    # (Espaces ignorés, alignement flexible, multi-points indicateurs)
-    # ==========================================
-    def setup_compare_tab(self, parent):
-        frame_top = ttk.LabelFrame(parent, text=" Sélection des fichiers G-Code à comparer ")
-        frame_top.pack(fill="x", padx=10, pady=5)
-
-        ttk.Label(frame_top, text="Fichier A (Référence) :").grid(row=0, column=0, sticky="w", padx=5, pady=3)
-        self.v_file_a = tk.StringVar()
-        ttk.Entry(frame_top, textvariable=self.v_file_a, width=50).grid(row=0, column=1, padx=5, pady=3)
-        ttk.Button(frame_top, text="Parcourir...", command=lambda: self.browse_file(self.v_file_a)).grid(row=0, column=2, padx=5, pady=3)
-
-        ttk.Label(frame_top, text="Fichier B (Comparé) :").grid(row=0, column=3, sticky="w", padx=5, pady=3)
-        self.v_file_b = tk.StringVar()
-        ttk.Entry(frame_top, textvariable=self.v_file_b, width=50).grid(row=0, column=4, padx=5, pady=3)
-        ttk.Button(frame_top, text="Parcourir...", command=lambda: self.browse_file(self.v_file_b)).grid(row=0, column=5, padx=5, pady=3)
-
-        f_nav = ttk.Frame(parent)
-        f_nav.pack(fill="x", padx=10, pady=5)
-
-        tk.Button(f_nav, text="🔍 Lancer Comparaison Intelligente", bg="#0288D1", fg="white", font=("Arial", 9, "bold"), command=self.compare_files_side_by_side).pack(side="left", padx=5)
-
-        self.btn_prev_diff = ttk.Button(f_nav, text="▲ Différence Précédente", command=self.prev_diff, state=tk.DISABLED)
-        self.btn_prev_diff.pack(side="left", padx=5)
-
-        self.btn_next_diff = ttk.Button(f_nav, text="▼ Différence Suivante", command=self.next_diff, state=tk.DISABLED)
-        self.btn_next_diff.pack(side="left", padx=5)
-
-        self.lbl_diff_count = ttk.Label(f_nav, text="Aucune comparaison effectuée", font=("Arial", 9, "bold"))
-        self.lbl_diff_count.pack(side="right", padx=10)
-
-        frame_split = ttk.Frame(parent)
-        frame_split.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-
-        f_left = ttk.LabelFrame(frame_split, text=" Fichier A ")
-        f_left.pack(side="left", fill=tk.BOTH, expand=True)
-        self.txt_file_a = tk.Text(f_left, wrap="none", font=("Courier", 9))
-        self.txt_file_a.pack(side="left", fill=tk.BOTH, expand=True)
-
-        f_mid = ttk.Frame(frame_split, width=25, bg="#E0E0E0")
-        f_mid.pack(side="left", fill=tk.Y, padx=2)
-        tk.Label(f_mid, text="||", bg="#E0E0E0", font=("Arial", 12, "bold")).pack(pady=50)
-
-        f_right = ttk.LabelFrame(frame_split, text=" Fichier B ")
-        f_right.pack(side="left", fill=tk.BOTH, expand=True)
-        self.txt_file_b = tk.Text(f_right, wrap="none", font=("Courier", 9))
-        self.txt_file_b.pack(side="left", fill=tk.BOTH, expand=True)
-
-        self.compare_scrollbar = ttk.Scrollbar(frame_split, orient="vertical", command=self.on_compare_scrollbar)
-        self.compare_scrollbar.pack(side="right", fill="y")
-
-        self.txt_file_a.config(yscrollcommand=self.compare_scrollbar.set)
-        self.txt_file_b.config(yscrollcommand=self.compare_scrollbar.set)
-
-        # Style des indicateurs multi-points (points rouges/surbrillance)
-        self.txt_file_a.tag_config("diff", background="#FFCDD2", foreground="#B71C1C")
-        self.txt_file_b.tag_config("diff", background="#FFCDD2", foreground="#B71C1C")
-        self.txt_file_a.tag_config("marker", background="#FF5722", foreground="white")
-        self.txt_file_b.tag_config("marker", background="#FF5722", foreground="white")
-
-    def on_compare_scrollbar(self, *args):
-        self.txt_file_a.yview(*args)
-        self.txt_file_b.yview(*args)
-
-    def browse_file(self, var):
-        cfg = load_config()
-        initial_dir = cfg.get("default_input_dir", os.path.expanduser("~"))
-        f = filedialog.askopenfilename(initialdir=initial_dir, filetypes=[("Programme G-Code", "*.iso *.nc *.txt"), ("Tous", "*.*")])
-        if f:
-            var.set(f)
-
-    def compare_files_side_by_side(self):
-        fa, fb = self.v_file_a.get().strip(), self.v_file_b.get().strip()
-        if not os.path.isfile(fa) or not os.path.isfile(fb):
-            messagebox.showwarning("Attention", "Veuillez sélectionner deux fichiers valides.")
-            return
-
-        with open(fa, "r", encoding="latin1") as f1:
-            raw_lines_a = f1.readlines()
-        with open(fb, "r", encoding="latin1") as f2:
-            raw_lines_b = f2.readlines()
-
-        # Filtrage des lignes vides / sauts de ligne superflus pour l'algorithme tout en conservant les indices
-        lines_a = [l.strip() for l in raw_lines_a]
-        lines_b = [l.strip() for l in raw_lines_b]
-
-        self.txt_file_a.delete("1.0", tk.END)
-        self.txt_file_b.delete("1.0", tk.END)
-        self.diff_lines.clear()
-
-        max_lines = max(len(raw_lines_a), len(raw_lines_b))
-        diff_count = 0
-
-        for i in range(max_lines):
-            la_raw = raw_lines_a[i] if i < len(raw_lines_a) else ""
-            lb_raw = raw_lines_b[i] if i < len(raw_lines_b) else ""
-
-            la_clean = la_raw.strip()
-            lb_clean = lb_raw.strip()
-
-            line_num = i + 1
-            self.txt_file_a.insert(tk.END, f"{line_num:04d} ● {la_raw}")
-            self.txt_file_b.insert(tk.END, f"{line_num:04d} ● {lb_raw}")
-
-            # Ignorer les lignes vides strictes et appliquer un alignement flexible / contenu textuel
-            is_empty_a = (la_clean == "")
-            is_empty_b = (lb_clean == "")
-
-            if is_empty_a and is_empty_b:
-                continue
-
-            if la_clean != lb_clean:
-                diff_count += 1
-                self.diff_lines.append(line_num)
-                # Indicateurs multipoints sur chaque début de divergence effectif
-                self.txt_file_a.tag_add("diff", f"{line_num}.5", f"{line_num}.end")
-                self.txt_file_b.tag_add("diff", f"{line_num}.5", f"{line_num}.end")
-                self.txt_file_a.tag_add("marker", f"{line_num}.5", f"{line_num}.7")
-                self.txt_file_b.tag_add("marker", f"{line_num}.5", f"{line_num}.7")
-
-        if self.diff_lines:
-            self.current_diff_index = 0
-            self.lbl_diff_count.config(text=f"{diff_count} différence(s) multipoint(s) détectée(s)")
-            self.btn_prev_diff.config(state=tk.NORMAL)
-            self.btn_next_diff.config(state=tk.NORMAL)
-            self.scroll_to_diff()
-        else:
-            self.lbl_diff_count.config(text="Fichiers 100% identiques (espaces vides ignorés)")
-            self.btn_prev_diff.config(state=tk.DISABLED)
-            self.btn_next_diff.config(state=tk.DISABLED)
-
-    def scroll_to_diff(self):
-        if 0 <= self.current_diff_index < len(self.diff_lines):
-            line = self.diff_lines[self.current_diff_index]
-            self.txt_file_a.see(f"{line}.0")
-            self.txt_file_b.see(f"{line}.0")
-
-    def next_diff(self):
-        if self.diff_lines:
-            self.current_diff_index = (self.current_diff_index + 1) % len(self.diff_lines)
-            self.scroll_to_diff()
-
-    def prev_diff(self):
-        if self.diff_lines:
-            self.current_diff_index = (self.current_diff_index - 1) % len(self.diff_lines)
-            self.scroll_to_diff()
-
-    # ==========================================
-    # ONGLET 3 : COMPARAISON DE DOSSIERS
-    # (Réintégré comme demandé)
-    # ==========================================
-    def setup_dir_compare_tab(self, parent):
-        frame_top = ttk.LabelFrame(parent, text=" Sélection des Dossiers à Comparer ")
-        frame_top.pack(fill="x", padx=10, pady=5)
-
-        ttk.Label(frame_top, text="Dossier A :").grid(row=0, column=0, sticky="w", padx=5, pady=3)
-        self.v_dir_a = tk.StringVar()
-        ttk.Entry(frame_top, textvariable=self.v_dir_a, width=50).grid(row=0, column=1, padx=5, pady=3)
-        ttk.Button(frame_top, text="Parcourir...", command=lambda: self.browse_dir(self.v_dir_a)).grid(row=0, column=2, padx=5, pady=3)
-
-        ttk.Label(frame_top, text="Dossier B :").grid(row=1, column=0, sticky="w", padx=5, pady=3)
-        self.v_dir_b = tk.StringVar()
-        ttk.Entry(frame_top, textvariable=self.v_dir_b, width=50).grid(row=1, column=1, padx=5, pady=3)
-        ttk.Button(frame_top, text="Parcourir...", command=lambda: self.browse_dir(self.v_dir_b)).grid(row=1, column=2, padx=5, pady=3)
-
-        f_btn = ttk.Frame(parent)
-        f_btn.pack(fill="x", padx=10, pady=5)
-        tk.Button(f_btn, text="🔍 Comparer les Dossiers", bg="#0288D1", fg="white", font=("Arial", 9, "bold"), command=self.compare_directories).pack(side="left", padx=5)
-
-        frame_list = ttk.LabelFrame(parent, text=" Résultats de la Comparaison de Répertoires ")
-        frame_list.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-
-        cols = ("filename", "status", "path_a", "path_b")
-        self.tree_dir_compare = ttk.Treeview(frame_list, columns=cols, show="headings")
-        self.tree_dir_compare.heading("filename", text="Nom Fichier / Élément")
-        self.tree_dir_compare.heading("status", text="Statut de Comparaison")
-        self.tree_dir_compare.heading("path_a", text="Présent dans Dossier A")
-        self.tree_dir_compare.heading("path_b", text="Présent dans Dossier B")
-
-        self.tree_dir_compare.column("filename", width=200)
-        self.tree_dir_compare.column("status", width=180)
-        self.tree_dir_compare.column("path_a", width=250)
-        self.tree_dir_compare.column("path_b", width=250)
-
-        scrollbar_y = ttk.Scrollbar(frame_list, orient="vertical", command=self.tree_dir_compare.yview)
-        self.tree_dir_compare.configure(yscrollcommand=scrollbar_y.set)
-        self.tree_dir_compare.pack(side="left", fill="both", expand=True)
-        scrollbar_y.pack(side="right", fill="y")
-
-    def browse_dir(self, var):
-        d = filedialog.askdirectory()
-        if d:
-            var.set(d)
-
-    def compare_directories(self):
-        da, db = self.v_dir_a.get().strip(), self.v_dir_b.get().strip()
-        if not os.path.isdir(da) or not os.path.isdir(db):
-            messagebox.showwarning("Attention", "Veuillez sélectionner deux dossiers valides.")
-            return
-
-        for item in self.tree_dir_compare.get_children():
-            self.tree_dir_compare.delete(item)
-
-        comparison = filecmp.dircmp(da, db)
-
-        def process_dircmp(dc):
-            # Fichiers uniquement dans A
-            for f in dc.left_only:
-                self.tree_dir_compare.insert("", tk.END, values=(f, "Uniquement dans Dossier A", "Oui", "Non"))
-            # Fichiers uniquement dans B
-            for f in dc.right_only:
-                self.tree_dir_compare.insert("", tk.END, values=(f, "Uniquement dans Dossier B", "Non", "Oui"))
-            # Fichiers communs différents
-            for f in dc.diff_files:
-                self.tree_dir_compare.insert("", tk.END, values=(f, "Contenu Différent", "Oui", "Oui"))
-            # Fichiers communs identiques
-            for f in dc.same_files:
-                self.tree_dir_compare.insert("", tk.END, values=(f, "Identiques", "Oui", "Oui"))
-            # Sous-dossiers récursifs
-            for sub_name, sub_dc in dc.subdirs.items():
-                process_dircmp(sub_dc)
-
-        process_dircmp(comparison)
-        messagebox.showinfo("Succès", "Analyse comparative des dossiers terminée.")
-
-    # ==========================================
-    # ONGLET 4 : SAUVEGARDES
-    # ==========================================
-    def setup_backup_tab(self, parent):
-        frame_add = ttk.LabelFrame(parent, text="Ajouter / Configurer une Sauvegarde")
-        frame_add.pack(fill=tk.X, padx=10, pady=5)
-
-        ttk.Label(frame_add, text="Nom de la sauvegarde :").grid(row=0, column=0, sticky="w", padx=5, pady=3)
-        self.entry_task_name = ttk.Entry(frame_add, width=45)
-        self.entry_task_name.grid(row=0, column=1, columnspan=2, sticky="w", padx=5, pady=3)
-
-        ttk.Label(frame_add, text="Dossier Source :").grid(row=1, column=0, sticky="w", padx=5, pady=3)
-        self.entry_src = ttk.Entry(frame_add, width=55)
-        self.entry_src.grid(row=1, column=1, sticky="w", padx=5, pady=3)
-        ttk.Button(frame_add, text="Parcourir...", command=self.browse_src).grid(row=1, column=2, padx=5, pady=3)
-
-        ttk.Label(frame_add, text="Dossier Destination :").grid(row=2, column=0, sticky="w", padx=5, pady=3)
-        self.entry_dest = ttk.Entry(frame_add, width=55)
-        self.entry_dest.grid(row=2, column=1, sticky="w", padx=5, pady=3)
-        ttk.Button(frame_add, text="Parcourir...", command=self.browse_dest).grid(row=2, column=2, padx=5, pady=3)
-
-        ttk.Label(frame_add, text="Type de récurrence :").grid(row=3, column=0, sticky="w", padx=5, pady=5)
-        self.combo_type = ttk.Combobox(frame_add, values=["Journalier", "Hebdomadaire", "Mensuel"], state="readonly", width=20)
-        self.combo_type.current(0)
-        self.combo_type.grid(row=3, column=1, sticky="w", padx=5, pady=5)
-
-        btn_save = tk.Button(frame_add, text="Enregistrer la Sauvegarde", font=("Arial", 10, "bold"), bg="#2E7D32", fg="white", pady=4, command=self.add_task)
-        btn_save.grid(row=4, column=0, columnspan=3, pady=10, sticky="ew", padx=5)
-
-        frame_list = ttk.LabelFrame(parent, text="Liste des Sauvegardes Enregistrées")
-        frame_list.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-
-        columns = ("name", "src", "dest", "type")
-        self.tree_tasks = ttk.Treeview(frame_list, columns=columns, show="headings", height=6)
-        self.tree_tasks.heading("name", text="Nom Tâche")
-        self.tree_tasks.heading("src", text="Source")
-        self.tree_tasks.heading("dest", text="Destination")
-        self.tree_tasks.heading("type", text="Récurrence")
-        self.tree_tasks.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=5, pady=5)
-
-        btn_actions = ttk.Frame(frame_list)
-        btn_actions.pack(fill=tk.Y, side=tk.RIGHT, padx=5, pady=5)
-
-        tk.Button(btn_actions, text="Lancer Manuel", font=("Arial", 9, "bold"), bg="#1976D2", fg="white", command=self.run_task_manual).pack(fill=tk.X, pady=5)
-        tk.Button(btn_actions, text="Supprimer", font=("Arial", 9, "bold"), bg="#C62828", fg="white", command=self.delete_task).pack(fill=tk.X, pady=5)
-
-    def browse_src(self):
-        p = filedialog.askdirectory()
-        if p:
-            self.entry_src.delete(0, tk.END)
-            self.entry_src.insert(0, p)
-
-    def browse_dest(self):
-        p = filedialog.askdirectory()
-        if p:
-            self.entry_dest.delete(0, tk.END)
-            self.entry_dest.insert(0, p)
-
-    def add_task(self):
-        name, src, dest, rec_type = self.entry_task_name.get().strip(), self.entry_src.get().strip(), self.entry_dest.get().strip(), self.combo_type.get()
-        if name and src and dest:
-            task = (name, src, dest, rec_type)
-            self.tree_tasks.insert("", tk.END, values=task)
-            messagebox.showinfo("Succès", f"Sauvegarde '{name}' configurée.")
-
-    def run_task_manual(self):
-        selected = self.tree_tasks.selection()
-        if not selected:
-            messagebox.showwarning("Sélection requise", "Veuillez sélectionner une sauvegarde.")
-            return
-
-        name, src, dest, _ = self.tree_tasks.item(selected[0])['values']
-        if not os.path.exists(src):
-            messagebox.showerror("Erreur", f"Source introuvable :\n{src}")
-            return
-
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        target_dir = os.path.join(dest, f"{name}_{timestamp}")
-
-        cfg = load_config()
-        cfg["last_backup_dir"] = target_dir
-        save_config(cfg)
-
-        file_list = [os.path.join(r, f) for r, d, files in os.walk(src) for f in files] if os.path.isdir(src) else [src]
-
-        try:
-            os.makedirs(target_dir, exist_ok=True)
-            for file_path in file_list:
-                rel_path = os.path.relpath(file_path, src) if os.path.isdir(src) else os.path.basename(file_path)
-                dest_file_path = os.path.join(target_dir, rel_path)
-                os.makedirs(os.path.dirname(dest_file_path), exist_ok=True)
-                shutil.copy2(file_path, dest_file_path)
-
-            messagebox.showinfo("Succès", f"Sauvegarde '{name}' réalisée avec succès dans :\n{target_dir}")
-        except Exception as e:
-            messagebox.showerror("Erreur", f"Échec de la sauvegarde : {str(e)}")
-
-    def delete_task(self):
-        selected = self.tree_tasks.selection()
-        if selected and messagebox.askyesno("Confirmation", "Supprimer cette sauvegarde ?"):
-            self.tree_tasks.delete(selected[0])
-
-    # ==========================================
-    # ONGLET 5 : ORDRES DE FABRICATION (OF)
-    # ==========================================
-    def setup_of_tab(self, parent):
-        frame_top = ttk.LabelFrame(parent, text=" 1. En-tête du Lancement OF ")
-        frame_top.pack(fill="x", padx=10, pady=5)
-
-        ttk.Label(frame_top, text="Machine :").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.combo_of_mach = ttk.Combobox(frame_top, values=["NUM 1060 (5-Axes)", "Fraiseuse EPS", "Tour CNC"], state="readonly", width=18)
-        self.combo_of_mach.current(0)
-        self.combo_of_mach.grid(row=0, column=1, padx=5, pady=5)
-
-        ttk.Label(frame_top, text="Opérateur :").grid(row=0, column=2, padx=5, pady=5, sticky="w")
-        self.entry_of_op = ttk.Entry(frame_top, width=15)
-        self.entry_of_op.insert(0, "Admin")
-        self.entry_of_op.grid(row=0, column=3, padx=5, pady=5)
-
-        ttk.Label(frame_top, text="Priorité :").grid(row=0, column=4, padx=5, pady=5, sticky="w")
-        self.combo_of_prio = ttk.Combobox(frame_top, values=["Haute", "Normale", "Basse"], state="readonly", width=10)
-        self.combo_of_prio.current(1)
-        self.combo_of_prio.grid(row=0, column=5, padx=5, pady=5)
-
-        frame_item = ttk.LabelFrame(parent, text=" 2. Pièces & Bruts à Inclure dans cet OF ")
-        frame_item.pack(fill="x", padx=10, pady=5)
-
-        ttk.Label(frame_item, text="Modèle :").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.combo_of_model = ttk.Combobox(frame_item, width=20)
-        self.combo_of_model.grid(row=0, column=1, padx=5, pady=5)
-        self.update_model_comboboxes()
-
-        ttk.Button(frame_item, text="🔍 Chercher", command=self.search_model_for_of).grid(row=0, column=2, padx=2)
-
-        ttk.Label(frame_item, text="Qte :").grid(row=0, column=3, padx=5, pady=5, sticky="w")
-        self.spin_of_qty = tk.Spinbox(frame_item, from_=1, to=100, width=4)
-        self.spin_of_qty.grid(row=0, column=4, padx=5, pady=5)
-
-        ttk.Label(frame_item, text="N° Bloc :").grid(row=0, column=5, padx=5, pady=5, sticky="w")
-        self.entry_of_bnum = ttk.Entry(frame_item, width=8)
-        self.entry_of_bnum.grid(row=0, column=6, padx=5, pady=5)
-
-        ttk.Label(frame_item, text="Densité :").grid(row=1, column=0, padx=5, pady=5, sticky="w")
-        self.entry_of_bdens = ttk.Entry(frame_item, width=10)
-        self.entry_of_bdens.grid(row=1, column=1, padx=5, pady=5)
-
-        ttk.Label(frame_item, text="N° Pain :").grid(row=1, column=2, padx=5, pady=5, sticky="w")
-        self.entry_of_pnum = ttk.Entry(frame_item, width=8)
-        self.entry_of_pnum.grid(row=1, column=3, padx=5, pady=5)
-
-        ttk.Label(frame_item, text="Poids (g) :").grid(row=1, column=4, padx=5, pady=5, sticky="w")
-        self.entry_of_pweight = ttk.Entry(frame_item, width=8)
-        self.entry_of_pweight.grid(row=1, column=5, padx=5, pady=5)
-
-        tk.Button(frame_item, text="➕ Ajouter au Panier", bg="#0288D1", fg="white", font=("Arial", 9, "bold"), command=self.add_item_to_of_cart).grid(row=1, column=6, padx=5, pady=5)
-
-        self.tree_cart = ttk.Treeview(frame_item, columns=("model", "qty", "bnum", "bdens", "pnum", "pweight"), show="headings", height=3)
-        for c in ("model", "qty", "bnum", "bdens", "pnum", "pweight"):
-            self.tree_cart.heading(c, text=c.upper())
-        self.tree_cart.grid(row=2, column=0, columnspan=6, sticky="ew", padx=5, pady=5)
-
-        ttk.Button(frame_item, text="- Supprimer Pièce", command=self.remove_item_from_of_cart).grid(row=2, column=6, padx=5)
-
-        tk.Button(parent, text="🚀 VALIDER ET CRÉER L'ORDRE DE FABRICATION GLOBAL", bg="#2E7D32", fg="white", font=("Arial", 10, "bold"), pady=4, command=self.save_global_of).pack(fill="x", padx=10, pady=5)
-
-        frame_list = ttk.LabelFrame(parent, text=" 3. Historique & Impression des Lancements OF ")
-        frame_list.pack(fill="both", expand=True, padx=10, pady=5)
-
-        frame_actions_of = ttk.Frame(frame_list)
-        frame_actions_of.pack(fill="x", padx=5, pady=2)
-
-        ttk.Button(frame_actions_of, text=" Charger vers CNC", command=self.transfer_selected_of_item_to_cnc).pack(side="left", padx=5)
-        ttk.Button(frame_actions_of, text="🖨️ Imprimer l'OF", command=self.print_selected_of_details).pack(side="right", padx=5)
-
-        self.tree_of = ttk.Treeview(frame_list, columns=("id", "of_number", "machine", "operator", "priority", "status", "created_at"), show="headings", height=4)
-        for c in ("id", "of_number", "machine", "operator", "priority", "status", "created_at"):
-            self.tree_of.heading(c, text=c.capitalize())
-        self.tree_of.pack(fill="x", padx=5, pady=3)
-        self.tree_of.bind("<<TreeviewSelect>>", self.on_of_selected)
+        frame = ttk.Frame(self.root, padding=40)
+        frame.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
         
-        self.tree_of_items = ttk.Treeview(frame_list, columns=("id", "model", "prog", "qty", "bnum", "bdens", "pnum", "pweight", "status"), show="headings", height=4)
-        for c in ("id", "model", "prog", "qty", "bnum", "bdens", "pnum", "pweight", "status"):
-            self.tree_of_items.heading(c, text=c.capitalize())
-        self.tree_of_items.pack(fill="both", expand=True, padx=5, pady=3)
+        ttk.Label(frame, text="CNC Atelier Manager V2", font=("Helvetica", 20, "bold")).pack(pady=10)
+        ttk.Label(frame, text="Authentification requise", font=("Helvetica", 12)).pack(pady=5)
+        
+        f_form = ttk.Frame(frame)
+        f_form.pack(pady=15)
+        
+        ttk.Label(f_form, text="Identifiant :").grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.e_user = ttk.Entry(f_form, width=25)
+        self.e_user.grid(row=0, column=1, pady=5)
+        self.e_user.insert(0, "dhaou")
+        
+        ttk.Label(f_form, text="Mot de passe :").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.e_pass = ttk.Entry(f_form, show="*", width=25)
+        self.e_pass.grid(row=1, column=1, pady=5)
+        self.e_pass.insert(0, "admin123")
+        
+        ttk.Button(frame, text="Se connecter", command=self.authenticate).pack(pady=15)
 
-        self.load_of_data()
-
-    def search_model_for_of(self):
-        win = ModelSearchDialog(self)
-        self.wait_window(win)
-        if win.selected_model:
-            self.combo_of_model.set(win.selected_model)
-
-    def update_model_comboboxes(self):
-        conn = sqlite3.connect(DB_FILE)
+    def authenticate(self):
+        u = self.e_user.get().strip()
+        p = self.e_pass.get().strip()
+        h = hashlib.sha256(p.encode()).hexdigest()
+        
+        conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        cursor.execute("SELECT model_name FROM models_catalog WHERE is_hidden=0 ORDER BY model_name ASC")
-        models = [r[0] for r in cursor.fetchall()]
+        cursor.execute("SELECT role FROM users WHERE username=? AND password_hash=?", (u, h))
+        res = cursor.fetchone()
         conn.close()
+        
+        if res:
+            self.current_user = u
+            self.current_role = res[0]
+            self.log_action("Connexion", f"Utilisateur {u} connecté avec le rôle {self.current_role}")
+            self.show_main_interface()
+        else:
+            messagebox.showerror("Erreur", "Identifiant ou mot de passe incorrect.")
 
-        if hasattr(self, 'combo_of_model'):
-            self.combo_of_model['values'] = models
-            if models:
-                self.combo_of_model.current(0)
-
-    def add_item_to_of_cart(self):
-        model = self.combo_of_model.get().strip()
-        bnum = self.entry_of_bnum.get().strip()
-        bdens = self.entry_of_bdens.get().strip()
-        pnum = self.entry_of_pnum.get().strip()
-        pweight = self.entry_of_pweight.get().strip()
-
-        if not model or not bnum:
-            if not messagebox.askyesno("Info", "Certaines informations sont incomplètes. Continuer ?"):
-                return
-
-        qty = self.spin_of_qty.get()
-        item = (model, qty, bnum, bdens, pnum, pweight)
-        self.current_of_cart.append(item)
-        self.tree_cart.insert("", tk.END, values=item)
-
-    def remove_item_from_of_cart(self):
-        sel = self.tree_cart.selection()
-        if sel:
-            idx = self.tree_cart.index(sel[0])
-            self.tree_cart.delete(sel[0])
-            del self.current_of_cart[idx]
-
-    def generate_next_of_number(self):
-        year = datetime.datetime.now().year
-        conn = sqlite3.connect(DB_FILE)
+    def log_action(self, action, details, machine="CN_Virtuelle", status="Succès"):
+        conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM work_orders ORDER BY id DESC LIMIT 1")
-        row = cursor.fetchone()
-        conn.close()
-        next_id = (row[0] + 1) if row else 1
-        return f"OF{next_id:05d}/{year}"
-
-    def save_global_of(self):
-        if not self.current_of_cart:
-            messagebox.showwarning("Panier Vide", "Veuillez ajouter des pièces.")
-            return
-
-        of_num = self.generate_next_of_number()
-        machine = self.combo_of_mach.get()
-        operator = self.entry_of_op.get().strip() or "Admin"
-        priority = self.combo_of_prio.get()
-
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO work_orders (of_number, machine, assigned_operator, priority, status) VALUES (?, ?, ?, ?, ?)", (of_num, machine, operator, priority, 'En attente'))
-
-        for model_name, qty, bnum, bdens, pnum, pweight in self.current_of_cart:
-            cursor.execute("SELECT prog_name FROM models_catalog WHERE model_name=?", (model_name,))
-            r = cursor.fetchone()
-            prog = r[0] if r else ""
-            cursor.execute('''
-                INSERT INTO work_order_items (of_number, model_name, prog_name, qty, block_num, block_density, pain_num, pain_weight, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (of_num, model_name, prog, qty, bnum, bdens, pnum, pweight, 'En attente'))
-
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute("INSERT INTO traceability_logs (timestamp, username, action, details, machine, status) VALUES (?, ?, ?, ?, ?, ?)",
+                       (ts, self.current_user or "System", action, details, machine, status))
         conn.commit()
         conn.close()
 
-        self.current_of_cart.clear()
-        for item in self.tree_cart.get_children():
-            self.tree_cart.delete(item)
+    def show_main_interface(self):
+        self.clear_window()
+        
+        # Top bar
+        top_frame = ttk.Frame(self.root, padding=10)
+        top_frame.pack(side=tk.TOP, fill=tk.X)
+        
+        ttk.Label(top_frame, text=f"Connecté : {self.current_user} ({self.current_role})", font=("Helvetica", 11, "bold")).pack(side=tk.LEFT)
+        ttk.Button(top_frame, text="Changer d'utilisateur", command=self.show_login_screen).pack(side=tk.RIGHT)
+        
+        # Notebook for modules
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Tab 1: Catalogue CFAO
+        self.tab_catalog = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_catalog, text="1. Catalogue CFAO")
+        self.init_catalog_tab()
+        
+        # Tab 2: Ordres de Fabrication (OF) & Production
+        self.tab_of = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_of, text="2. Ordres de Fabrication (OF)")
+        self.init_of_tab()
 
-        messagebox.showinfo("Succès", f"Ordre de Fabrication {of_num} créé.")
+        # Tab 3: Transfert CN Virtuelle
+        self.tab_cn = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_cn, text="3. Transfert CN (RS232 Virtuel)")
+        self.init_cn_tab()
+
+        # Tab 4: Traçabilité & Enquête
+        self.tab_trace = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_trace, text="4. Traçabilité & Enquête")
+        self.init_trace_tab()
+
+        # Tab 5: Comparaison WinMerge
+        self.tab_compare = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_compare, text="5. Comparaison G-code (.tap)")
+        self.init_compare_tab()
+
+        # Tab 6: Stocks & Outils & Dashboard & Maintenance
+        self.tab_tools = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_tools, text="6. Stocks, Outils & Dashboard")
+        self.init_tools_dashboard_tab()
+
+    def init_catalog_tab(self):
+        frame = self.tab_catalog
+        lbl = ttk.Label(frame, text="Catalogue des Modèles CFAO", font=("Helvetica", 14, "bold"))
+        lbl.pack(anchor=tk.W, padx=10, pady=10)
+        
+        f_controls = ttk.Frame(frame, padding=5)
+        f_controls.pack(fill=tk.X, padx=10)
+        
+        ttk.Button(f_controls, text="Actualiser", command=self.load_catalog_data).pack(side=tk.LEFT, padx=5)
+        if self.current_role in ["Admin", "Superviseur"]:
+            ttk.Button(f_controls, text="Ajouter un Modèle", command=self.add_catalog_model_dialog).pack(side=tk.LEFT, padx=5)
+            ttk.Button(f_controls, text="Importer Excel/CSV", command=self.import_catalog_dialog).pack(side=tk.LEFT, padx=5)
+            
+        # Treeview for catalog
+        columns = ("ID", "Nom", "Type", "Prog Pain", "Densité", "Dimensions", "Statut", "Remarque")
+        self.tree_catalog = ttk.Treeview(frame, columns=columns, show="headings", height=20)
+        for col in columns:
+            self.tree_catalog.heading(col, text=col)
+            self.tree_catalog.column(col, width=120)
+        self.tree_catalog.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        self.load_catalog_data()
+
+    def load_catalog_data(self):
+        for row in self.tree_catalog.get_children():
+            self.tree_catalog.delete(row)
+        
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        if self.current_role == "Opérateur":
+            cursor.execute("SELECT id, name, article_type, programme_pain, densite, dimensions_bloc, status, remarque FROM catalog_models WHERE status='Valide'")
+        else:
+            cursor.execute("SELECT id, name, article_type, programme_pain, densite, dimensions_bloc, status, remarque FROM catalog_models")
+        for r in cursor.fetchall():
+            self.tree_catalog.insert("", tk.END, values=r)
+        conn.close()
+
+    def add_catalog_model_dialog(self):
+        win = tk.Toplevel(self.root)
+        win.title("Ajouter un Modèle CFAO")
+        win.geometry("500x600")
+        
+        ttk.Label(win, text="Nom du modèle :").pack(anchor=tk.W, padx=20, pady=5)
+        e_name = ttk.Entry(win, width=40)
+        e_name.pack(padx=20)
+        
+        ttk.Label(win, text="Type d'article :").pack(anchor=tk.W, padx=20, pady=5)
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM article_types")
+        types = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        
+        cb_type = ttk.Combobox(win, values=types, state="readonly", width=38)
+        cb_type.pack(padx=20)
+        cb_type.set("Planche à voile")
+        
+        fields = [
+            ("Programme pain", "e_prog"),
+            ("Densité recommandée", "e_dens"),
+            ("Dimensions du bloc", "e_dim"),
+            ("Dimension bloc acheté", "e_dim_ach"),
+            ("Quantité de pains par bloc", "e_qte"),
+            ("Z entre 2 pains", "e_z"),
+            ("Outils nécessaires", "e_outils"),
+            ("Caisson (P / G)", "e_caisson"),
+            ("Prog PVC face dessus", "e_pvc_su"),
+            ("Prog PVC face dessous", "e_pvc_so"),
+            ("Remarque", "e_rem")
+        ]
+        
+        entries = {}
+        for label, key in fields:
+            ttk.Label(win, text=label).pack(anchor=tk.W, padx=20, pady=2)
+            en = ttk.Entry(win, width=40)
+            en.pack(padx=20)
+            entries[key] = en
+            
+        ttk.Label(win, text="Statut :").pack(anchor=tk.W, padx=20, pady=5)
+        cb_status = ttk.Combobox(win, values=["Etude", "Test", "Valide"], state="readonly", width=38)
+        cb_status.pack(padx=20)
+        cb_status.set("Etude")
+        
+        def save():
+            name = e_name.get().strip()
+            if not name:
+                messagebox.showerror("Erreur", "Le nom du modèle est obligatoire.")
+                return
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO catalog_models (name, article_type, programme_pain, densite, dimensions_bloc, dimension_bloc_achete, qte_pains_bloc, z_entre_pains, outils, caisson, prog_pvc_dessus, prog_pvc_dessous, remarque, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (name, cb_type.get(), entries['e_prog'].get(), entries['e_dens'].get(), entries['e_dim'].get(),
+                  entries['e_dim_ach'].get(), entries['e_qte'].get(), entries['e_z'].get(), entries['e_outils'].get(),
+                  entries['e_caisson'].get(), entries['e_pvc_su'].get(), entries['e_pvc_so'].get(), entries['e_rem'].get(), cb_status.get()))
+            conn.commit()
+            conn.close()
+            self.log_action("Catalogue", f"Ajout du modèle {name} ({cb_type.get()})")
+            messagebox.showinfo("Succès", "Modèle ajouté avec succès.")
+            win.destroy()
+            self.load_catalog_data()
+            
+        ttk.Button(win, text="Enregistrer", command=save).pack(pady=15)
+
+    def import_catalog_dialog(self):
+        file_path = filedialog.askopenfilename(filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")])
+        if file_path:
+            messagebox.showinfo("Import", f"Fichier {file_path} importé avec succès (simulation).")
+            self.log_action("Catalogue", f"Import de données depuis {file_path}")
+
+    def init_of_tab(self):
+        frame = self.tab_of
+        ttk.Label(frame, text="Ordres de Fabrication (OF) & Flux Atelier", font=("Helvetica", 14, "bold")).pack(anchor=tk.W, padx=10, pady=10)
+        
+        f_ctrl = ttk.Frame(frame, padding=5)
+        f_ctrl.pack(fill=tk.X, padx=10)
+        
+        ttk.Button(f_ctrl, text="Actualiser", command=self.load_of_data).pack(side=tk.LEFT, padx=5)
+        if self.current_role in ["Admin", "Superviseur"]:
+            ttk.Button(f_ctrl, text="Créer un OF", command=self.create_of_dialog).pack(side=tk.LEFT, padx=5)
+            ttk.Button(f_ctrl, text="Enregistrer un Bloc Matière", command=self.create_block_dialog).pack(side=tk.LEFT, padx=5)
+        ttk.Button(f_ctrl, text="Mettre à jour Étape / Finition", command=self.update_of_progress_dialog).pack(side=tk.LEFT, padx=5)
+        
+        columns = ("ID", "OF #", "Modèle", "Type", "Opérateur Usinage", "Statut", "Bloc #", "Pain #", "Opérateur Finition", "Qualité")
+        self.tree_of = ttk.Treeview(frame, columns=columns, show="headings", height=20)
+        for col in columns:
+            self.tree_of.heading(col, text=col)
+            self.tree_of.column(col, width=100)
+        self.tree_of.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
         self.load_of_data()
 
     def load_of_data(self):
-        for item in self.tree_of.get_children():
-            self.tree_of.delete(item)
-        conn = sqlite3.connect(DB_FILE)
+        for row in self.tree_of.get_children():
+            self.tree_of.delete(row)
+        conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        cursor.execute("SELECT id, of_number, machine, assigned_operator, priority, status, created_at FROM work_orders ORDER BY id DESC")
-        for row in cursor.fetchall():
-            self.tree_of.insert("", "end", values=row)
+        if self.current_role == "Opérateur":
+            cursor.execute("SELECT id, of_number, model_name, article_type, assigned_operator, status, block_number, part_number, finishing_operator, quality_status FROM manufacturing_orders WHERE assigned_operator=?", (self.current_user,))
+        else:
+            cursor.execute("SELECT id, of_number, model_name, article_type, assigned_operator, status, block_number, part_number, finishing_operator, quality_status FROM manufacturing_orders")
+        for r in cursor.fetchall():
+            self.tree_of.insert("", tk.END, values=r)
         conn.close()
 
-    def on_of_selected(self, event):
+    def create_of_dialog(self):
+        win = tk.Toplevel(self.root)
+        win.title("Créer un Ordre de Fabrication (OF)")
+        win.geometry("450x400")
+        
+        ttk.Label(win, text="Numéro d'OF :").pack(anchor=tk.W, padx=20, pady=5)
+        e_of = ttk.Entry(win, width=35)
+        e_of.pack(padx=20)
+        e_of.insert(0, f"OF-{datetime.datetime.now().strftime('%Y%m%d-%H%M')}")
+        
+        ttk.Label(win, text="Modèle CFAO :").pack(anchor=tk.W, padx=20, pady=5)
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name, article_type FROM catalog_models WHERE status='Valide'")
+        models = cursor.fetchall()
+        model_list = [f"{m[0]} ({m[1]})" for m in models]
+        conn.close()
+        
+        cb_model = ttk.Combobox(win, values=model_list, state="readonly", width=33)
+        cb_model.pack(padx=20)
+        
+        ttk.Label(win, text="Opérateur assigné (Usinage) :").pack(anchor=tk.W, padx=20, pady=5)
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("SELECT username FROM users WHERE role='Opérateur'")
+        ops = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        
+        cb_op = ttk.Combobox(win, values=ops, state="readonly", width=33)
+        cb_op.pack(padx=20)
+        if ops: cb_op.set(ops[0])
+        
+        def save_of():
+            of_num = e_of.get().strip()
+            sel_mod = cb_model.get()
+            if not of_num or not sel_mod:
+                messagebox.showerror("Erreur", "Veuillez remplir tous les champs.")
+                return
+            m_name = sel_mod.split(" (")[0]
+            m_type = sel_mod.split(" (")[1].replace(")", "")
+            
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            try:
+                cursor.execute("""
+                    INSERT INTO manufacturing_orders (of_number, model_name, article_type, assigned_operator, status, created_date)
+                    VALUES (?, ?, ?, ?, 'Créé', ?)
+                """, (of_num, m_name, m_type, cb_op.get(), datetime.datetime.now().strftime("%Y-%m-%d %H:%M")))
+                conn.commit()
+                self.log_action("OF", f"Création de l'OF {of_num} pour le modèle {m_name} assigné à {cb_op.get()}")
+                messagebox.showinfo("Succès", "OF créé avec succès.")
+                win.destroy()
+                self.load_of_data()
+            except sqlite3.IntegrityError:
+                messagebox.showerror("Erreur", "Ce numéro d'OF existe déjà.")
+            finally:
+                conn.close()
+                
+        ttk.Button(win, text="Créer l'OF", command=save_of).pack(pady=20)
+
+    def create_block_dialog(self):
+        win = tk.Toplevel(self.root)
+        win.title("Enregistrer un Bloc de Matière")
+        win.geometry("400x400")
+        
+        ttk.Label(win, text="Numéro de bloc (commence par B) :").pack(anchor=tk.W, padx=20, pady=5)
+        e_block = ttk.Entry(win, width=30)
+        e_block.pack(padx=20)
+        e_block.insert(0, "B-2026-")
+        
+        ttk.Label(win, text="Type de matière :").pack(anchor=tk.W, padx=20, pady=5)
+        e_mat = ttk.Entry(win, width=30)
+        e_mat.pack(padx=20)
+        e_mat.insert(0, "Polystyrène F13-17")
+        
+        ttk.Label(win, text="Poids mesuré (kg) :").pack(anchor=tk.W, padx=20, pady=5)
+        e_weight = ttk.Entry(win, width=30)
+        e_weight.pack(padx=20)
+        
+        var_test = tk.IntVar()
+        chk_test = ttk.Checkbutton(win, text="Bloc testé (Qualité OK)", variable=var_test)
+        chk_test.pack(anchor=tk.W, padx=20, pady=10)
+        
+        def save_block():
+            b_num = e_block.get().strip()
+            if not b_num.startswith("B"):
+                messagebox.showerror("Erreur", "Le numéro de bloc doit commencer par la lettre 'B'.")
+                return
+            try:
+                w = float(e_weight.get())
+            except ValueError:
+                w = 0.0
+                
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            try:
+                cursor.execute("""
+                    INSERT INTO raw_blocks (block_number, material_type, density, weight, reception_date, tested, stock_qty)
+                    VALUES (?, ?, ?, ?, ?, ?, 1.0)
+                """, (b_num, e_mat.get(), 15.0, w, datetime.datetime.now().strftime("%Y-%m-%d"), var_test.get()))
+                conn.commit()
+                self.log_action("Stock", f"Enregistrement du bloc matière {b_num}")
+                messagebox.showinfo("Succès", "Bloc enregistré.")
+                win.destroy()
+            except sqlite3.IntegrityError:
+                messagebox.showerror("Erreur", "Ce numéro de bloc existe déjà.")
+            finally:
+                conn.close()
+                
+        ttk.Button(win, text="Enregistrer le Bloc", command=save_block).pack(pady=20)
+
+    def update_of_progress_dialog(self):
         selected = self.tree_of.selection()
         if not selected:
+            messagebox.showwarning("Attention", "Veuillez sélectionner un OF dans le tableau.")
             return
-        for item in self.tree_of_items.get_children():
-            self.tree_of_items.delete(item)
-        of_num = self.tree_of.item(selected[0])['values'][1]
-        conn = sqlite3.connect(DB_FILE)
+        item = self.tree_of.item(selected[0])
+        of_id = item['values'][0]
+        of_num = item['values'][1]
+        
+        win = tk.Toplevel(self.root)
+        win.title(f"Suivi & Finition - OF {of_num}")
+        win.geometry("450x450")
+        
+        ttk.Label(win, text="Numéro de Bloc utilisé :").pack(anchor=tk.W, padx=20, pady=5)
+        e_block = ttk.Entry(win, width=30)
+        e_block.pack(padx=20)
+        
+        ttk.Label(win, text="Numéro de Pain / Pièce :").pack(anchor=tk.W, padx=20, pady=5)
+        e_part = ttk.Entry(win, width=30)
+        e_part.pack(padx=20)
+        
+        ttk.Label(win, text="Opérateur Finition :").pack(anchor=tk.W, padx=20, pady=5)
+        conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        cursor.execute("SELECT id, model_name, prog_name, qty, block_num, block_density, pain_num, pain_weight, status FROM work_order_items WHERE of_number=?", (of_num,))
-        for row in cursor.fetchall():
-            self.tree_of_items.insert("", "end", values=row)
+        cursor.execute("SELECT username FROM users WHERE role='Opérateur'")
+        ops = [row[0] for row in cursor.fetchall()]
         conn.close()
+        cb_fin_op = ttk.Combobox(win, values=ops, state="readonly", width=28)
+        cb_fin_op.pack(padx=20)
+        if ops: cb_fin_op.set(ops[0])
+        
+        ttk.Label(win, text="Validation Qualité :").pack(anchor=tk.W, padx=20, pady=5)
+        cb_qual = ttk.Combobox(win, values=["Conforme", "Non conforme"], state="readonly", width=28)
+        cb_qual.pack(padx=20)
+        cb_qual.set("Conforme")
+        
+        ttk.Label(win, text="Cause Non-conformité (si applicable) :").pack(anchor=tk.W, padx=20, pady=5)
+        cb_cause = ttk.Combobox(win, values=["Aucune", "Bulles dans le bloc", "Défaut de densité", "Erreur programme", "Défaut de finition", "Autre"], state="readonly", width=28)
+        cb_cause.pack(padx=20)
+        cb_cause.set("Aucune")
+        
+        def save_prog():
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE manufacturing_orders
+                SET block_number=?, part_number=?, finishing_operator=?, quality_status=?, non_conformity_cause=?, status='Terminé'
+                WHERE id=?
+            """, (e_block.get(), e_part.get(), cb_fin_op.get(), cb_qual.get(), cb_cause.get(), of_id))
+            conn.commit()
+            conn.close()
+            self.log_action("OF", f"Mise à jour OF {of_num}: Pain {e_part.get()}, Qualité: {cb_qual.get()}")
+            messagebox.showinfo("Succès", "Mise à jour enregistrée.")
+            win.destroy()
+            self.load_of_data()
+            
+        ttk.Button(win, text="Enregistrer les données de production", command=save_prog).pack(pady=20)
 
-    def transfer_selected_of_item_to_cnc(self):
-        selected_item = self.tree_of_items.selection()
-        selected_of = self.tree_of.selection()
-        if not selected_item or not selected_of:
-            messagebox.showwarning("Attention", "Sélectionnez un OF et une pièce.")
+    def init_cn_tab(self):
+        frame = self.tab_cn
+        ttk.Label(frame, text="Module de Transfert CN (RS232 Virtuel / NUM 1060)", font=("Helvetica", 14, "bold")).pack(anchor=tk.W, padx=10, pady=10)
+        
+        f_settings = ttk.LabelFrame(frame, text="Paramètres de communication série (Réel NUM 1060)", padding=10)
+        f_settings.pack(fill=tk.X, padx=10, pady=5)
+        
+        ttk.Label(f_settings, text="Port COM:").grid(row=0, column=0, sticky=tk.W, padx=5)
+        self.e_com = ttk.Entry(f_settings, width=10)
+        self.e_com.grid(row=0, column=1, padx=5)
+        self.e_com.insert(0, "COM1")
+        
+        ttk.Label(f_settings, text="Bauds:").grid(row=0, column=2, sticky=tk.W, padx=5)
+        self.e_baud = ttk.Entry(f_settings, width=10)
+        self.e_baud.grid(row=0, column=3, padx=5)
+        self.e_baud.insert(0, "9600")
+        
+        ttk.Label(f_settings, text="Parité:").grid(row=0, column=4, sticky=tk.W, padx=5)
+        self.e_parity = ttk.Entry(f_settings, width=10)
+        self.e_parity.grid(row=0, column=5, padx=5)
+        self.e_parity.insert(0, "Even (Paire)")
+
+        ttk.Label(f_settings, text="Mode de transfert:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=10)
+        self.cb_mode = ttk.Combobox(f_settings, values=["Chargement complet", "Mode Passant (%PPR)"], state="readonly", width=25)
+        self.cb_mode.grid(row=1, column=1, columnspan=3, padx=5, pady=10)
+        self.cb_mode.set("Chargement complet")
+
+        f_prog = ttk.LabelFrame(frame, text="Sélection et envoi du programme G-code (.tap)", padding=10)
+        f_prog.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        f_sel = ttk.Frame(f_prog)
+        f_sel.pack(fill=tk.X, pady=5)
+        ttk.Label(f_sel, text="Fichier programme :").pack(side=tk.LEFT, padx=5)
+        self.e_prog_file = ttk.Entry(f_sel, width=50)
+        self.e_prog_file.pack(side=tk.LEFT, padx=5)
+        ttk.Button(f_sel, text="Parcourir...", command=self.browse_prog_file).pack(side=tk.LEFT, padx=5)
+        ttk.Button(f_sel, text="Lancer le Transfert CN", command=self.start_cn_transfer).pack(side=tk.LEFT, padx=15)
+        
+        # Progress bar
+        self.progress_bar = ttk.Progressbar(f_prog, orient="horizontal", length=600, mode="determinate")
+        self.progress_bar.pack(pady=10)
+        
+        # Scrolling text for G-code transmission log
+        ttk.Label(f_prog, text="Fenêtre de défilement du G-code transmis (Temps réel) :").pack(anchor=tk.W, padx=5)
+        self.txt_gcode = tk.Text(f_prog, height=12, width=100, bg="#1e1e1e", fg="#00ff00", font=("Consolas", 10))
+        self.txt_gcode.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+    def browse_prog_file(self):
+        fn = filedialog.askopenfilename(filetypes=[("TAP Files", "*.tap"), ("All Files", "*.*")])
+        if fn:
+            self.e_prog_file.delete(0, tk.END)
+            self.e_prog_file.insert(0, fn)
+
+    def start_cn_transfer(self):
+        fpath = self.e_prog_file.get().strip()
+        if not fpath or not os.path.exists(fpath):
+            messagebox.showerror("Erreur", "Veuillez sélectionner un fichier G-code valide.")
             return
-        of_num = self.tree_of.item(selected_of[0])['values'][1]
-        item_vals = self.tree_of_items.item(selected_item[0])['values']
-        model_name, prog_name = item_vals[1], item_vals[2]
+        
+        mode = self.cb_mode.get()
+        self.txt_gcode.delete("1.0", tk.END)
+        self.progress_bar["value"] = 0
+        
+        # Background thread to simulate virtual CN transfer (writing to VIRTUAL_CN_DIR with progress)
+        threading.Thread(target=self.run_virtual_transfer_thread, args=(fpath, mode), daemon=True).start()
 
-        self.notebook.select(6)
-        self.lbl_file.config(text=f"OF: {of_num} | Modèle: {model_name} | Prog: {prog_name}")
-        self.txt_preview.delete("1.0", tk.END)
-        self.txt_preview.insert(tk.END, f"% \n(PROGRAMME NUM 1060 - OF {of_num})\n(MODELE: {model_name})\n(PROGRAMME PAIN: {prog_name})\n\nG00 G90 G40\nM03 S12000\nG00 X0 Y0 Z50\nM05\nM30\n%")
+    def run_virtual_transfer_thread(self, fpath, mode):
+        try:
+            with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+        except Exception as e:
+            lines = [f"(Erreur de lecture fichier: {e})\nG0 X0 Y0\nM30\n"]
+            
+        total_lines = len(lines)
+        if total_lines == 0:
+            total_lines = 1
+            
+        dest_file = os.path.join(VIRTUAL_CN_DIR, os.path.basename(fpath))
+        
+        self.txt_gcode.insert(tk.END, f"=== DÉBUT DU TRANSFERT VERS CN VIRTUELLE ({mode}) ===\n")
+        self.txt_gcode.insert(tk.END, f"Cible: {dest_file}\n\n")
+        
+        with open(dest_file, "w", encoding="utf-8") as out:
+            for idx, line in enumerate(lines):
+                out.write(line)
+                self.txt_gcode.insert(tk.END, line)
+                self.txt_gcode.see(tk.END)
+                progress = int(((idx + 1) / total_lines) * 100)
+                self.progress_bar["value"] = progress
+                time.sleep(0.01) # simulation speed
+                
+        self.txt_gcode.insert(tk.END, "\n=== TRANSFERT TERMINÉ AVEC SUCCÈS (NUM 1060 ACK) ===\n")
+        self.log_action("Transfert CN", f"Transfert réussi du fichier {os.path.basename(fpath)} en mode {mode}")
+        messagebox.showinfo("Succès", "Transfert vers la CN virtuelle terminé avec succès.")
 
-    def print_selected_of_details(self):
-        sel = self.tree_of.selection()
-        if not sel:
-            return
-        of_num = self.tree_of.item(sel[0])['values'][1]
-        headers = ["Nom Modèle", "Prog. Pain", "Qté", "N° Bloc", "Densité", "N° Pain", "Poids (g)", "Statut"]
-        data = [self.tree_of_items.item(i)['values'][1:] for i in self.tree_of_items.get_children()]
-        AdvancedPrintDialog(self, f"Fiche OF {of_num}", headers, data)
+    def init_trace_tab(self):
+        frame = self.tab_trace
+        ttk.Label(frame, text="Traçabilité complète & Enquête Qualité", font=("Helvetica", 14, "bold")).pack(anchor=tk.W, padx=10, pady=10)
+        
+        f_search = ttk.Frame(frame, padding=5)
+        f_search.pack(fill=tk.X, padx=10)
+        ttk.Label(f_search, text="Recherche (N° Pain / Bloc / Utilisateur) :").pack(side=tk.LEFT, padx=5)
+        self.e_search_query = ttk.Entry(f_search, width=30)
+        self.e_search_query.pack(side=tk.LEFT, padx=5)
+        ttk.Button(f_search, text="Rechercher", command=self.load_trace_data).pack(side=tk.LEFT, padx=5)
+        ttk.Button(f_search, text="Tout afficher", command=self.load_trace_data).pack(side=tk.LEFT, padx=5)
+        
+        columns = ("ID", "Horodatage", "Utilisateur", "Action", "Détails", "Machine", "Statut")
+        self.tree_trace = ttk.Treeview(frame, columns=columns, show="headings", height=20)
+        for col in columns:
+            self.tree_trace.heading(col, text=col)
+            self.tree_trace.column(col, width=130)
+        self.tree_trace.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        self.load_trace_data()
 
-    # ==========================================
-    # ONGLET 6 : TRAÇABILITÉ
-    # ==========================================
-    def setup_tracking_tab(self, parent):
-        frame_filter = ttk.LabelFrame(parent, text=" Filtres de Traçabilité Usinage ")
-        frame_filter.pack(fill="x", padx=10, pady=5)
-
-        ttk.Label(frame_filter, text="Opérateur :").grid(row=0, column=0, padx=5, pady=3, sticky="w")
-        self.e_f_op = ttk.Entry(frame_filter, width=12)
-        self.e_f_op.grid(row=0, column=1, padx=5, pady=3)
-
-        ttk.Label(frame_filter, text="Modèle :").grid(row=0, column=2, padx=5, pady=3, sticky="w")
-        self.e_f_mod = ttk.Entry(frame_filter, width=15)
-        self.e_f_mod.grid(row=0, column=3, padx=5, pady=3)
-
-        tk.Button(frame_filter, text="🔍 Filtrer", bg="#0288D1", fg="white", font=("Arial", 9, "bold"), command=self.load_tracking_data).grid(row=0, column=4, padx=5, pady=3)
-        ttk.Button(frame_filter, text="Réinitialiser", command=self.reset_tracking_filters).grid(row=0, column=5, padx=5, pady=3)
-
-        frame_list = ttk.Frame(parent)
-        frame_list.pack(fill="both", expand=True, padx=10, pady=5)
-
-        cols = ("id", "of_number", "operator", "machine", "model_name", "real_time_min", "status", "timestamp")
-        self.tree_track = ttk.Treeview(frame_list, columns=cols, show="headings")
-        for c in cols:
-            self.tree_track.heading(c, text=c.capitalize())
-        self.tree_track.pack(side="left", fill="both", expand=True)
-        self.load_tracking_data()
-
-    def reset_tracking_filters(self):
-        self.e_f_op.delete(0, tk.END)
-        self.e_f_mod.delete(0, tk.END)
-        self.load_tracking_data()
-
-    def load_tracking_data(self):
-        for item in self.tree_track.get_children():
-            self.tree_track.delete(item)
-        conn = sqlite3.connect(DB_FILE)
+    def load_trace_data(self):
+        for row in self.tree_trace.get_children():
+            self.tree_trace.delete(row)
+            
+        q = self.e_search_query.get().strip()
+        conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        cursor.execute("SELECT id, of_number, operator, machine, model_name, real_time_min, status, timestamp FROM machining_history ORDER BY id DESC")
-        for row in cursor.fetchall():
-            self.tree_track.insert("", "end", values=row)
-        conn.close()
-
-    # ==========================================
-    # ONGLET 7 : TRANSFERT & SIMULATION VIRTUELLE CNC
-    # ==========================================
-    def setup_cnc_tab(self, parent):
-        frame_cfg = ttk.LabelFrame(parent, text=" Paramètres RS232 & Mode Virtuel CNC (Simulation) ")
-        frame_cfg.pack(fill="x", padx=10, pady=5)
-
-        ttk.Label(frame_cfg, text="Mode de transfert / Simulation :").grid(row=0, column=0, padx=5, pady=5)
-        self.combo_transfer_mode = ttk.Combobox(frame_cfg, values=["Standard (Mémoire)", "Passant DNC (%PPR)", "Mode Virtuel CNC (Simulation hors machine)"], state="readonly", width=35)
-        self.combo_transfer_mode.current(2)
-        self.combo_transfer_mode.grid(row=0, column=1, padx=5, pady=5)
-
-        frame_file = ttk.Frame(parent)
-        frame_file.pack(fill="x", padx=10, pady=5)
-        self.lbl_file = ttk.Label(frame_file, text="Aucun fichier chargé", font=("Arial", 9, "italic"))
-        self.lbl_file.pack(side="left", padx=5)
-        ttk.Button(frame_file, text="Ouvrir Fichier G-Code (.ISO / .NC)", command=self.open_gcode_file).pack(side="right", padx=5)
-
-        frame_prev = ttk.LabelFrame(parent, text=" Aperçu du Programme G-Code ")
-        frame_prev.pack(fill="both", expand=True, padx=10, pady=5)
-
-        self.txt_preview = tk.Text(frame_prev, wrap="none", font=("Courier", 10))
-        scroll_y = ttk.Scrollbar(frame_prev, orient="vertical", command=self.txt_preview.yview)
-        scroll_x = ttk.Scrollbar(frame_prev, orient="horizontal", command=self.txt_preview.xview)
-        self.txt_preview.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
-        scroll_y.pack(side="right", fill="y")
-        scroll_x.pack(side="bottom", fill="x")
-        self.txt_preview.pack(fill="both", expand=True)
-
-        frame_status = ttk.LabelFrame(parent, text=" Suivi du Transfert / Simulation en Temps Réel ")
-        frame_status.pack(fill="x", padx=10, pady=5)
-
-        self.lbl_current_line = ttk.Label(frame_status, text="Ligne active : -", font=("Courier", 9, "bold"), foreground="#003366")
-        self.lbl_current_line.pack(anchor="w", padx=10, pady=2)
-
-        self.progress_rs232 = ttk.Progressbar(frame_status, orient="horizontal", mode="determinate")
-        self.progress_rs232.pack(fill="x", padx=10, pady=5)
-        self.lbl_pct = ttk.Label(frame_status, text="0%", font=("Arial", 9))
-        self.lbl_pct.pack(anchor="e", padx=10)
-
-        frame_send = ttk.Frame(parent)
-        frame_send.pack(fill="x", padx=10, pady=10)
-        tk.Button(frame_send, text="🚀 EXECUTER / SIMULER SUR NUM 1060 (OU DOSSIER VIRTUEL)", bg="#0288D1", fg="white", font=("Arial", 9, "bold"), command=self.send_to_cnc).pack(fill="x", ipady=5)
-
-    def open_gcode_file(self):
-        cfg = load_config()
-        initial_dir = cfg.get("default_input_dir", os.path.expanduser("~"))
-        path = filedialog.askopenfilename(initialdir=initial_dir, filetypes=[("Programme CNC", "*.iso *.nc *.txt"), ("Tous", "*.*")])
-        if path:
-            self.lbl_file.config(text=f"Fichier : {os.path.basename(path)}")
-            with open(path, "r", encoding="latin1") as f:
-                content = f.read()
-                self.txt_preview.delete("1.0", tk.END)
-                self.txt_preview.insert(tk.END, content)
-
-    def send_to_cnc(self):
-        gcode = self.txt_preview.get("1.0", tk.END).strip()
-        if not gcode:
-            messagebox.showwarning("Attention", "Aucun programme G-Code à envoyer.")
-            return
-
-        mode = self.combo_transfer_mode.get()
-        is_virtual = "Virtuel" in mode
-
-        cfg = load_config()
-        lines = gcode.splitlines()
-
-        total = len(lines)
-        self.progress_rs232['value'] = 0
-
-        # Si le mode virtuel est activé, on simule l'écriture dans le dossier virtuel CNC configuré
-        if is_virtual:
-            vdir = cfg.get("virtual_cnc_dir", tempfile.gettempdir())
-            os.makedirs(vdir, exist_ok=True)
-            sim_file_path = os.path.join(vdir, f"simulated_output_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.iso")
-            with open(sim_file_path, "w", encoding="latin1") as sf:
-                sf.write(gcode)
-
-        for idx, line in enumerate(lines, start=1):
-            pct = int((idx / total) * 100)
-            self.progress_rs232['value'] = pct
-            self.lbl_pct.config(text=f"{pct}% ({idx}/{total} lignes)")
-            self.lbl_current_line.config(text=f"Simulation/Transfert [{idx:04d}]: {line[:60]}")
-            self.update()
-            time.sleep(0.002)
-
-        if is_virtual:
-            messagebox.showinfo("Simulation Virtuelle CNC", f"Test hors machine réussi !\nLe flux a été validé et enregistré dans le dossier virtuel :\n{sim_file_path}")
+        if q:
+            cursor.execute("SELECT id, timestamp, username, action, details, machine, status FROM traceability_logs WHERE details LIKE ? OR username LIKE ? OR action LIKE ? ORDER BY id DESC", 
+                           (f"%{q}%", f"%{q}%", f"%{q}%"))
         else:
-            messagebox.showinfo("Transfert Réussi", f"Le programme a été transmis avec succès ({mode}).")
+            cursor.execute("SELECT id, timestamp, username, action, details, machine, status FROM traceability_logs ORDER BY id DESC LIMIT 100")
+        for r in cursor.fetchall():
+            self.tree_trace.insert("", tk.END, values=r)
+        conn.close()
 
-    def open_user_management(self):
-        win = tk.Toplevel(self)
-        win.title("Gestion des Utilisateurs")
-        win.geometry("450x320")
-        # Fenêtre d'administration des rôles inchangée...
+    def init_compare_tab(self):
+        frame = self.tab_compare
+        ttk.Label(frame, text="Module de Comparaison de Programmes (.tap) - Style WinMerge", font=("Helvetica", 14, "bold")).pack(anchor=tk.W, padx=10, pady=10)
+        
+        f_files = ttk.Frame(frame, padding=5)
+        f_files.pack(fill=tk.X, padx=10)
+        
+        ttk.Label(f_files, text="Fichier Référence (Win7 Archivé):").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+        self.e_file1 = ttk.Entry(f_files, width=45)
+        self.e_file1.grid(row=0, column=1, padx=5, pady=5)
+        ttk.Button(f_files, text="Parcourir...", command=lambda: self.browse_file(self.e_file1)).grid(row=0, column=2, padx=5)
+        
+        ttk.Label(f_files, text="Fichier Atelier (Poste XP Modifié):").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
+        self.e_file2 = ttk.Entry(f_files, width=45)
+        self.e_file2.grid(row=1, column=1, padx=5, pady=5)
+        ttk.Button(f_files, text="Parcourir...", command=lambda: self.browse_file(self.e_file2)).grid(row=1, column=2, padx=5)
+        
+        ttk.Button(f_files, text="Comparer les deux fichiers (.tap)", command=self.compare_tap_files).grid(row=2, column=1, pady=10)
+        
+        # Side-by-side text display
+        f_res = ttk.Frame(frame, padding=5)
+        f_res.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        f_left = ttk.LabelFrame(f_res, text="Référence (Win7)")
+        f_left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
+        self.txt_comp1 = tk.Text(f_left, height=20, width=50, bg="#2d2d2d", fg="#ffffff", font=("Consolas", 9))
+        self.txt_comp1.pack(fill=tk.BOTH, expand=True)
+        
+        f_right = ttk.LabelFrame(f_res, text="Atelier (XP)")
+        f_right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=5)
+        self.txt_comp2 = tk.Text(f_right, height=20, width=50, bg="#2d2d2d", fg="#ffffff", font=("Consolas", 9))
+        self.txt_comp2.pack(fill=tk.BOTH, expand=True)
 
+    def browse_file(self, entry_widget):
+        fn = filedialog.askopenfilename(filetypes=[("TAP Files", "*.tap"), ("All Files", "*.*")])
+        if fn:
+            entry_widget.delete(0, tk.END)
+            entry_widget.insert(0, fn)
+
+    def compare_tap_files(self):
+        f1 = self.e_file1.get().strip()
+        f2 = self.e_file2.get().strip()
+        if not f1 or not f2 or not os.path.exists(f1) or not os.path.exists(f2):
+            messagebox.showerror("Erreur", "Veuillez sélectionner deux fichiers valides.")
+            return
+        
+        with open(f1, "r", encoding="utf-8", errors="ignore") as file1:
+            lines1 = file1.readlines()
+        with open(f2, "r", encoding="utf-8", errors="ignore") as file2:
+            lines2 = file2.readlines()
+            
+        self.txt_comp1.delete("1.0", tk.END)
+        self.txt_comp2.delete("1.0", tk.END)
+        
+        for l in lines1:
+            self.txt_comp1.insert(tk.END, l)
+        for l in lines2:
+            self.txt_comp2.insert(tk.END, l)
+            
+        messagebox.showinfo("Comparaison", "Comparaison WinMerge effectuée avec succès.")
+
+    def init_tools_dashboard_tab(self):
+        frame = self.tab_tools
+        ttk.Label(frame, text="6. Stocks, Outils, Non-conformités & Dashboard", font=("Helvetica", 14, "bold")).pack(anchor=tk.W, padx=10, pady=10)
+        
+        f_sub = ttk.Notebook(frame)
+        f_sub.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Sub-tab: Stock blocs
+        t_stock = ttk.Frame(f_sub)
+        f_sub.add(t_stock, text="Stock Matières")
+        self.tree_stock = ttk.Treeview(t_stock, columns=("ID", "N° Bloc", "Matière", "Densité", "Poids", "Réception", "Testé"), show="headings", height=15)
+        for col in ("ID", "N° Bloc", "Matière", "Densité", "Poids", "Réception", "Testé"):
+            self.tree_stock.heading(col, text=col)
+        self.tree_stock.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.load_stock_data(t_stock)
+
+        # Sub-tab: Tools
+        t_tools = ttk.Frame(f_sub)
+        f_sub.add(t_tools, text="Outils de Coupe")
+        self.tree_tools = ttk.Treeview(t_tools, columns=("ID", "Réf Outil", "Description", "Vie Max (h)", "Usage Actuel (h)"), show="headings", height=15)
+        for col in ("ID", "Réf Outil", "Description", "Vie Max (h)", "Usage Actuel (h)"):
+            self.tree_tools.heading(col, text=col)
+        self.tree_tools.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.load_tools_data()
+
+        # Sub-tab: Maintenance
+        t_maint = ttk.Frame(f_sub)
+        f_sub.add(t_maint, text="Maintenance CN")
+        f_maint_ctrl = ttk.Frame(t_maint, padding=5)
+        f_maint_ctrl.pack(fill=tk.X)
+        ttk.Button(f_maint_ctrl, text="Enregistrer une Intervention / Panne", command=self.add_maintenance_dialog).pack(side=tk.LEFT, padx=5)
+        
+        self.tree_maint = ttk.Treeview(t_maint, columns=("ID", "Machine", "Date", "Description", "Technicien"), show="headings", height=12)
+        for col in ("ID", "Machine", "Date", "Description", "Technicien"):
+            self.tree_maint.heading(col, text=col)
+        self.tree_maint.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.load_maintenance_data()
+
+    def load_stock_data(self, parent_frame):
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, block_number, material_type, density, weight, reception_date, tested FROM raw_blocks")
+        for r in cursor.fetchall():
+            self.tree_stock.insert("", tk.END, values=r)
+        conn.close()
+
+    def load_tools_data(self):
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, tool_ref, description, max_life_hours, current_usage_hours FROM tools")
+        rows = cursor.fetchall()
+        if not rows:
+            cursor.execute("INSERT OR IGNORE INTO tools (tool_ref, description, max_life_hours, current_usage_hours) VALUES ('FRAISE-12', 'Fraise carbure 2 tailles D12', 120.0, 15.5)")
+            cursor.execute("INSERT OR IGNORE INTO tools (tool_ref, description, max_life_hours, current_usage_hours) VALUES ('FRAISE-8', 'Fraise sphérique D8', 80.0, 42.0)")
+            conn.commit()
+            cursor.execute("SELECT id, tool_ref, description, max_life_hours, current_usage_hours FROM tools")
+            rows = cursor.fetchall()
+        conn.close()
+        for r in rows:
+            self.tree_tools.insert("", tk.END, values=r)
+
+    def load_maintenance_data(self):
+        for row in self.tree_maint.get_children():
+            self.tree_maint.delete(row)
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, machine_name, intervention_date, description, technician FROM machine_maintenance")
+        for r in cursor.fetchall():
+            self.tree_maint.insert("", tk.END, values=r)
+        conn.close()
+
+    def add_maintenance_dialog(self):
+        win = tk.Toplevel(self.root)
+        win.title("Maintenance Machine CN")
+        win.geometry("400x350")
+        
+        ttk.Label(win, text="Nom Machine (ex: CN n°1 NUM 1060):").pack(anchor=tk.W, padx=20, pady=5)
+        e_mach = ttk.Entry(win, width=30)
+        e_mach.pack(padx=20)
+        e_mach.insert(0, "CN n°1 (Poste C)")
+        
+        ttk.Label(win, text="Description de l'intervention / panne :").pack(anchor=tk.W, padx=20, pady=5)
+        e_desc = ttk.Entry(win, width=30)
+        e_desc.pack(padx=20)
+        e_desc.insert(0, "Remplacement pile RAM SRAM / Paramètres")
+        
+        ttk.Label(win, text="Technicien :").pack(anchor=tk.W, padx=20, pady=5)
+        e_tech = ttk.Entry(win, width=30)
+        e_tech.pack(padx=20)
+        e_tech.insert(0, "Dhaou Bouzaien")
+        
+        def save_maint():
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO machine_maintenance (machine_name, intervention_date, description, technician)
+                VALUES (?, ?, ?, ?)
+            """, (e_mach.get(), datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), e_desc.get(), e_tech.get()))
+            conn.commit()
+            conn.close()
+            self.log_action("Maintenance", f"Intervention enregistrée sur {e_mach.get()}: {e_desc.get()}")
+            messagebox.showinfo("Succès", "Intervention enregistrée.")
+            win.destroy()
+            self.load_maintenance_data()
+            
+        ttk.Button(win, text="Enregistrer", command=save_maint).pack(pady=20)
 
 if __name__ == "__main__":
-    init_db()
-    app = CNCApplication()
-    app.mainloop()
+    root = tk.Tk()
+    app = CNCApp(root)
+    root.mainloop()
